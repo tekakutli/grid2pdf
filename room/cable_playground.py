@@ -49,12 +49,17 @@ and its physical neighbours.  Focused wall keeps its u; neighbours re-lay
 immediately left / right; everything else hides.  Visual aid only — the
 route planner works whether or not focus is engaged.
 
-Alt+click adopt / merge
------------------------
-A plain click near an existing endpoint just shares the anchor and starts
-a fresh cable — the two are still one physical cable through true-cable
-grouping.  Alt+click adopts (continue) that cable or merges the current
-drawing into it.  This makes merge an explicit gesture.
+Anchor reuse policy
+-------------------
+A plain click during drawing always creates a fresh vertex, even if it
+lands on top of an existing anchor.  The only exceptions:
+    - the anchor is already part of the drawing in progress, or
+    - the anchor's owning cable is in the OTHER view (cross-view
+      connection: floor cable snapping onto a wall footprint, or the
+      reverse).
+Everything else requires Alt: Alt+click near an existing endpoint reuses
+its anchor (connecting the two cables via the shared point), and Alt+click
+on an endpoint of another cable adopts/merges into it explicitly.
 
 Save format v3
 --------------
@@ -630,7 +635,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <body>
 <div id="ui">
   <h3>Cable / pipe layout planner <span id="snapPill">snap: off</span>
-      <button id="collapseBtn" title="Collapse panel">−</button></h3>
+      <button id="collapseBtn" title="Collapse panel (H)">−</button></h3>
   <div class="row">
     <button id="addNsGrid">+ N–S grid</button>
     <button id="addEwGrid">+ E–W grid</button>
@@ -657,10 +662,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     physically-connected wall between them, splits it at each corner, and
     files the pieces as one cable. Right-click undoes the last leg.
     Enter / Esc finishes.<br>
-    <b>Alt+click</b> on an existing endpoint to adopt (continue) that cable
-    or merge the current drawing into it.  A plain click near an endpoint
-    just shares the anchor and starts a fresh cable — the two are still one
-    physical cable through true-cable grouping.<br>
+    <b>Alt+click</b> a vertex to connect to it, adopt its cable, or merge the
+    current drawing into it.  A plain click during drawing always creates a
+    fresh vertex — your new cable is independent of anything you click near,
+    even if the vertex lands on the same physical point as an existing one.
+    (Cross-view connections — floor↔wall — still happen automatically: the
+    two views share anchors through the wall footprint.)<br>
     <b>Focus mode</b>: the strip narrows to the wall you clicked and its
     physical neighbours. Visual aid — the route planner works regardless.<br>
     <b>Hops</b> (green arcs): a cable that turns a corner between two walls
@@ -668,10 +675,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <b>Drag</b> a corner anchor: only its height moves; every partner at
     that physical corner tracks it.<br>
     Select a vertex, then <b>Delete</b>; with no vertex selected, <b>Delete</b>
-    removes the whole cable.
+    removes the whole cable. Press <b>H</b> to hide / show this panel.
   </div>
 </div>
-<button id="restoreBtn" title="Show panel">☰ Show panel</button>
+<button id="restoreBtn" title="Show panel (H)">☰ Show panel</button>
 <canvas id="c"></canvas>
 <script>
 "use strict";
@@ -920,13 +927,16 @@ function clampAnchorToSegment(a) {
 }
 
 /* Resolve a spec to an anchor id, preferring an existing match.  This is the
-   single funnel through which every anchor is created or reused. */
-function resolveSpecToAnchorId(spec, tolMm) {
+   single funnel through which every anchor is created or reused.  An
+   optional reuseFilter gates which existing anchors are eligible to be
+   matched — the anchor reuse policy lives at the call site. */
+function resolveSpecToAnchorId(spec, tolMm, reuseFilter) {
   if (!spec) return null;
 
   if (spec.space === "floor") {
     for (const a of anchors.values()) {
       if (a.space !== "floor") continue;
+      if (reuseFilter && !reuseFilter(a)) continue;
       if (Math.hypot(a.x - spec.x, a.y - spec.y) < tolMm) return a.id;
     }
     return makeAnchor("floor", {
@@ -942,6 +952,7 @@ function resolveSpecToAnchorId(spec, tolMm) {
     for (const a of anchors.values()) {
       if (a.space !== "wall-edge") continue;
       if (a.segIdx !== spec.segIdx) continue;
+      if (reuseFilter && !reuseFilter(a)) continue;
       if (Math.abs(a.v - spec.v) > tolMm) continue;
       const dt = Math.abs(a.t - spec.t) * s.len;
       if (dt < tolMm && dt < bestD) { bestD = dt; best = a; }
@@ -1322,7 +1333,7 @@ const state = {
 let drawing = null;
 let drawingPreview = null;
 let routeCache = [];
-const mouse = { sx: 0, sy: 0, view: null, inside: false };
+const mouse = { sx: 0, sy: 0, view: null, inside: false, alt: false };
 
 function updateSnapPill() {
   const el = document.getElementById("snapPill");
@@ -2265,8 +2276,13 @@ function drawDrawingPreview(view) {
     let sticky   = null;
     let snapSpec = null;
 
-    if (snapEnabled) {
-      sticky = findAnchorAtScreen(view, drawingPreview.sx, drawingPreview.sy);
+    /* Snapping is Shift-gated.  Alt is a separate gesture (explicit reuse
+       of an existing anchor); it engages the anchor-magnet too but with
+       the same reuse policy the click will use. */
+    if (snapEnabled || mouse.alt) {
+      const reuseFilter = (a) => isReusableAnchor(a, mouse.alt, view);
+      sticky = findAnchorAtScreen(view, drawingPreview.sx, drawingPreview.sy,
+                                  reuseFilter);
 
       if (!sticky) {
         snapSpec = (view === "floor")
@@ -2278,12 +2294,12 @@ function drawDrawingPreview(view) {
             ? viewFloor.scale
             : Math.min(viewWall.scaleX, viewWall.scaleY);
           const tolMm = ANCHOR_NEARBY_PX / scale;
-          /* Magnetic snap to an existing anchor at the same segment. */
           const s = WALL.segments[snapSpec.segIdx];
           if (s) {
             for (const a of anchors.values()) {
               if (a.space !== "wall-edge") continue;
               if (a.segIdx !== snapSpec.segIdx) continue;
+              if (!isReusableAnchor(a, mouse.alt, view)) continue;
               if (Math.abs(a.v - snapSpec.v) > tolMm) continue;
               if (Math.abs(a.t - snapSpec.t) * s.len < tolMm) {
                 sticky = a; snapSpec = null; break;
@@ -2310,7 +2326,7 @@ function drawDrawingPreview(view) {
           showY = snapSpec.v;
         }
       }
-    } else if (!snapEnabled && view === "wall") {
+    } else if (!snapEnabled && !mouse.alt && view === "wall") {
       const attach = uToWallAttach(pwx, pwy);
       if (attach) {
         showX = wallAttachToU(attach.segIdx, attach.t);
@@ -2333,7 +2349,7 @@ function drawDrawingPreview(view) {
             ctx.moveTo(lx, ly); ctx.lineTo(px, py);
             ctx.setLineDash([6, 4]);
             ctx.strokeStyle = sticky ? "#10b981"
-                            : snapEnabled ? "#0ea5e9" : "#94a3b8";
+                            : (snapEnabled || mouse.alt) ? "#0ea5e9" : "#94a3b8";
             ctx.lineWidth = 1.8;
             ctx.stroke(); ctx.setLineDash([]);
           }
@@ -2344,11 +2360,11 @@ function drawDrawingPreview(view) {
       ctx.arc(px, py, sticky ? 7 : (snapSpec ? 6 : 4), 0, Math.PI * 2);
       ctx.fillStyle = sticky ? "#10b981"
                     : snapSpec ? "#f59e0b"
-                    : (snapEnabled ? "#0ea5e9" : "#94a3b8");
+                    : (snapEnabled || mouse.alt) ? "#0ea5e9" : "#94a3b8";
       ctx.fill();
       ctx.strokeStyle = sticky ? "#047857"
                       : snapSpec ? "#b45309"
-                      : (snapEnabled ? "#0ea5e9" : "#94a3b8");
+                      : (snapEnabled || mouse.alt) ? "#0ea5e9" : "#94a3b8";
       ctx.lineWidth = 1.5; ctx.stroke();
 
       if (sticky) {
@@ -2363,20 +2379,24 @@ function drawDrawingPreview(view) {
     }
   }
 
-  const tgt = findMergeTarget(view, mouse.sx, mouse.sy);
-  if (tgt) {
-    const E = tgt.cable;
-    const a = anchors.get(E.anchorIds[tgt.endpointIdx]);
-    if (visAnchor(a)) {
-      const p = a ? project(a) : null;
-      if (p) {
-        const [tx, ty] = toScreen(p[0], p[1]);
-        ctx.beginPath();
-        ctx.arc(tx, ty, 10, 0, Math.PI * 2);
-        ctx.strokeStyle = "#10b981"; ctx.lineWidth = 2.6; ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(tx, ty, 5, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(16, 185, 129, 0.55)"; ctx.fill();
+  /* Merge-target indicator is Alt-only: without Alt, a plain click never
+     adopts or merges, so we don't promise it visually. */
+  if (mouse.alt) {
+    const tgt = findMergeTarget(view, mouse.sx, mouse.sy);
+    if (tgt) {
+      const E = tgt.cable;
+      const a = anchors.get(E.anchorIds[tgt.endpointIdx]);
+      if (visAnchor(a)) {
+        const p = a ? project(a) : null;
+        if (p) {
+          const [tx, ty] = toScreen(p[0], p[1]);
+          ctx.beginPath();
+          ctx.arc(tx, ty, 10, 0, Math.PI * 2);
+          ctx.strokeStyle = "#10b981"; ctx.lineWidth = 2.6; ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(tx, ty, 5, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(16, 185, 129, 0.55)"; ctx.fill();
+        }
       }
     }
   }
@@ -2528,11 +2548,7 @@ function addDrawPoint(sx, sy, altKey) {
   if (!drawing) return;
   const view = drawing.view;
 
-  /* Merge / adopt is explicit: hold Alt while clicking an existing
-     endpoint.  Without Alt, a click near an endpoint shares the anchor
-     and starts (or continues) a fresh cable — the two cables connect via
-     the shared anchor, and true-cable grouping shows them as one physical
-     cable, without being merged into a single stored cable. */
+  /* Alt+click on a nearby endpoint = adopt (start of drawing) or merge. */
   if (altKey) {
     const target = findMergeTarget(view, sx, sy);
     if (target) {
@@ -2542,8 +2558,11 @@ function addDrawPoint(sx, sy, altKey) {
     }
   }
 
+  /* Only reuse an anchor when the reuse predicate allows it. */
+  const reuseFilter = (a) => isReusableAnchor(a, altKey, view);
+
   let anchorId = null;
-  const nearby = findAnchorAtScreen(view, sx, sy);
+  const nearby = findAnchorAtScreen(view, sx, sy, reuseFilter);
   if (nearby) anchorId = nearby.id;
 
   let spec = null;
@@ -2563,10 +2582,9 @@ function addDrawPoint(sx, sy, altKey) {
     : Math.min(viewWall.scaleX, viewWall.scaleY);
   const tolMm = ANCHOR_NEARBY_PX / scale;
 
-  /* Wormhole route planner (wall view only).  When the click resolves to a
-     wall-edge on a different segment than the previous anchor, plan a route
-     through the physical adjacency graph; the resulting anchors replace
-     the single-anchor append. */
+  /* Wormhole route planner — intermediate corners always reuse, because
+     the route is by definition a connected path through the junction
+     graph.  Passing null for the filter means "reuse any matching anchor". */
   if (view === "wall" && anchorId == null && spec &&
       spec.space === "wall-edge" && drawing.anchorIds.length > 0) {
     const lastId = drawing.anchorIds[drawing.anchorIds.length - 1];
@@ -2579,7 +2597,7 @@ function addDrawPoint(sx, sy, altKey) {
       if (route && route.length > 1) {
         let inserted = 0;
         for (let i = 1; i < route.length; i++) {
-          const rid = resolveSpecToAnchorId(route[i], 5);
+          const rid = resolveSpecToAnchorId(route[i], 5, null);
           if (rid == null) continue;
           const lastInList = drawing.anchorIds[drawing.anchorIds.length - 1];
           if (lastInList !== rid) {
@@ -2602,7 +2620,7 @@ function addDrawPoint(sx, sy, altKey) {
 
   /* Normal single-anchor path. */
   if (anchorId == null) {
-    anchorId = resolveSpecToAnchorId(spec, tolMm);
+    anchorId = resolveSpecToAnchorId(spec, tolMm, reuseFilter);
     if (anchorId == null) { draw(); return; }
   }
   const last = drawing.anchorIds[drawing.anchorIds.length - 1];
@@ -2621,13 +2639,14 @@ function addDrawPoint(sx, sy, altKey) {
   draw();
 }
 
-function findAnchorAtScreen(view, sx, sy) {
+function findAnchorAtScreen(view, sx, sy, reuseFilter) {
   const project  = (view === "floor") ? anchorPlan : anchorWall;
   const toScreen = (view === "floor") ? w2sFloor   : w2sWall;
   let best = null, bestD = ANCHOR_NEARBY_PX;
   for (const a of anchors.values()) {
     if (view === "wall" && a.space === "wall-edge" && isSegHidden(a.segIdx))
       continue;
+    if (reuseFilter && !reuseFilter(a)) continue;
     const p = project(a);
     if (!p) continue;
     const [px, py] = toScreen(p[0], p[1]);
@@ -2635,6 +2654,37 @@ function findAnchorAtScreen(view, sx, sy) {
     if (d < bestD) { bestD = d; best = a; }
   }
   return best;
+}
+
+/* Find which cable (and in which view) owns an anchor.  Used by the reuse
+   predicate to allow cross-view connections without Alt. */
+function anchorOwnerCable(anchorId) {
+  for (const c of state.floorCables) {
+    if (c.anchorIds.includes(anchorId)) return { cable: c, view: "floor" };
+  }
+  for (const c of state.wallCables) {
+    if (c.anchorIds.includes(anchorId)) return { cable: c, view: "wall" };
+  }
+  return null;
+}
+
+/* An anchor is reusable on a plain click only if:
+     - Alt is held (explicit connection gesture), OR
+     - it already belongs to the drawing in progress (double-back onto
+       a vertex of the same in-flight cable), OR
+     - it belongs to a cable in the OTHER view (cross-view connection —
+       the floor cable snapping onto a wall footprint, or vice versa).
+   Everything else requires Alt.  This is what stops a fresh cable from
+   accidentally attaching to an unrelated existing cable on the same wall. */
+function isReusableAnchor(a, altHeld, currentView) {
+  if (!a) return false;
+  if (altHeld) return true;
+  if (drawing && drawing.anchorIds.includes(a.id)) return true;
+  if (currentView) {
+    const owner = anchorOwnerCable(a.id);
+    if (owner && owner.view !== currentView) return true;
+  }
+  return false;
 }
 
 function adoptMergeBase(target) {
@@ -3098,6 +3148,7 @@ window.addEventListener("mousemove", (e) => {
   const rect = canvas.getBoundingClientRect();
   const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
   mouse.sx = sx; mouse.sy = sy;
+  mouse.alt = e.altKey;
   mouse.inside = (sx >= 0 && sy >= 0 &&
                   sx < window.innerWidth && sy < window.innerHeight);
   mouse.view = mouse.inside ? whichView(sy) : null;
@@ -3170,7 +3221,7 @@ function updateStatus() {
     if (drawing.view === null) {
       statusEl.textContent =
         "drawing · click first point in floor plan OR wall strip" +
-        " · Alt+click endpoint to adopt/merge" + snapHint;
+        " · Alt+click a vertex to connect/adopt" + snapHint;
     } else {
       const base = drawing.baseCableId != null ? " · adopted a base cable" : "";
       let focusHint = "";
@@ -3181,7 +3232,7 @@ function updateStatus() {
       }
       statusEl.textContent =
         `drawing on ${drawing.view} · ${n} point${n === 1 ? "" : "s"}${base}${focusHint}` +
-        ` · Alt+click endpoint to adopt/merge${snapHint} · Enter / Esc finishes`;
+        ` · Alt+click a vertex to connect/adopt${snapHint} · Enter / Esc finishes`;
     }
     statusEl.className = "warn"; return;
   }
@@ -3508,7 +3559,6 @@ window.addEventListener("keydown", (e) => {
     if (drawing) { finishDraw(); return; }
     state.selectedCable = null; state.selectedVertex = null; draw();
   }
-  /* 'h' toggles the panel — matching the /keyboard convention. */
   if (e.key === "h" || e.key === "H") {
     if (uiEl.classList.contains("collapsed")) restorePanel();
     else                                       collapsePanel();
