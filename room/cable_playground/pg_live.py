@@ -5,13 +5,13 @@ Everything the playground's UX actually is: rendering decisions, snap
 producers, hop transitions, the wormhole route planner, drawing lifecycle,
 the Alt-click reuse policy, event handlers, status text.
 
-The cable-run export feature (one flattened diagram per true cable) lives
-in pg_export.py; it was split out so this file stays scoped to interactive
-playground behaviour.
-
 This module is expected to be fully rewritten whenever we iterate on the
 playground.  When you ask for a change, this is the file that gets
 reprinted — pg_core.py stays put unless the change touches the model.
+
+The printable cable-run diagram exporter used to live at the bottom of
+this file.  It has been extracted to pg_export.py so the volatile UX half
+stays focused on screen interaction.
 """
 
 

@@ -1,313 +1,210 @@
 """
-pg_export.py — cable run export half of the cable playground HTML/JS bundle.
+pg_export.py — print-friendly cable-run diagram exporter.
 
-Renders one schematic diagram per true (physical) cable — a flattened
-route through the room.  Exposes EXPORT_JS, concatenated by
-playground_html.py after pg_live.py.
+Extracted from pg_live.py so the playground's volatile UX half stays
+focused on screen interaction, while the printable-diagram renderer can
+evolve independently.
 
-This module owns its own constants, layout algorithm, renderer, and preview
-page.  It reads model state (anchors, state.floorCables/wallCables/trueCables,
-WALL, GEOMETRY, JUNCTIONS) but never writes to it, and never touches
-interactive playground state (drawing, drag, mouse, selection).
+Design goals
+------------
+The export is designed to be printed in black and white.  Every
+distinction that the on-screen view encodes with a colour is re-encoded
+here as a texture or line-style difference:
 
-Toggleable behaviours at the top of EXPORT_JS:
+    colour                  print encoding
+    --------------------    --------------------------------
+    cable (blue)            solid black, bold, white halo
+    wall<->floor link       thin dotted black + filled node
+    step face (blue-gray)   forward diagonal hatch, 8 px pitch
+    void (pale gray)        backslash diagonal hatch, 12 px pitch
+    traversed wall          solid black bar, thick, white-haloed arrows
+    plan interior (tint)    faint forward diagonal hatch, 22 px pitch
+    all text                solid black
 
-    filterCollinearVerticesInStrip
-        true  — in the wall strip of an exported diagram, anchors that
-                merely sit on a straight visual run inside a single wall
-                chunk are dropped from the pill labels; only the two
-                extremes of each straight run get a pill.  The blue cable
-                line is still drawn through every anchor.
-        false — every anchor gets its own pill (modulo co-located
-                clustering).  Original behaviour.
+The traversed-wall bar is drawn as a solid 7 px black stroke, exactly as
+it was before the print rework.  Arrowheads that terminate on a wall
+midpoint carry a thin white halo drawn underneath their black shape, so
+they never disappear into the bar.
 
-Assumed by pg_export.js (defined in pg_core.js or pg_live.js):
-    anchors, allCables, trueCableIdOf, JUNCTIONS, WALL, WALL_HEIGHT,
-    GEOMETRY, state, flashStatus.
+Exports
+-------
+The module's only public entry point is `EXPORT_JS`, a JS source string
+concatenated into the playground bundle after pg_core.py and pg_live.py.
+It installs an "Export cable runs" button, renders one PNG per true
+cable, and opens a preview tab where each card carries a
+`filter collinear vertices in strip` checkbox.  Toggling the checkbox
+re-renders every image and every JSON in place.
+
+Column of truth for collinear filtering
+---------------------------------------
+`window.filterCollinearVerticesInStrip` (default false) — when true,
+_collapseStripCollinear drops any wall-edge anchor lying on the same
+segment, at the same height, between two neighbours on the same segment.
+Plan view, strip view, vertex labels and the JSON anchor list all see
+the same filtered list, so they can never disagree.
+
+Leader / obstacle collision
+---------------------------
+The strip's pill-to-anchor leaders are tuned by a coordinate-descent
+optimiser.  It avoids five obstacle classes:
+
+    1. other leaders' vertical segments,
+    2. wall-section boundaries (the vertical edges between strip chunks),
+    3. the cable wire itself — the polyline that runs through the
+       strip's anchors,
+    4. wall chunk edges — the horizontal top (z_hi) and bottom (z_lo)
+       of every drawn wall band, plus the strip's outer ceiling and
+       floor rules,
+    5. other leaders' corner features.
+
+Parallel-overlap detection
+--------------------------
+A leader that runs alongside the wire is visually indistinguishable from
+the wire itself.  Sliding such a leader along the wire cannot fix the
+overlap, because the motion has no component perpendicular to the wire.
+Every wire/leader contact is therefore classified as *crossing* or
+*parallel* and a parallel contact is weighted an order of magnitude
+above a crossing.
+
+Dive modes
+----------
+To actually give the optimiser a way to escape a parallel contact, each
+leader has a discrete `diveMode`:
+
+    0 — default: anchor → (anchorX + offA, chanY) → (pillX, chanY) → …
+    1 — vertical first: anchor → (anchorX, chanY) → (pillX, chanY) → …
+    2 — horizontal first: anchor → (pillX, anchorY) → (pillX, chanY) → …
+
+Modes 1 and 2 introduce one pure-vertical and one pure-horizontal leg
+respectively — segments that cannot be parallel to a diagonal wire.
+The optimiser tries all three and accepts a switch only when the
+full re-evaluated score improves, so a mode change that trades the
+original parallel run for a fresh overlap elsewhere is rejected.
+
+Wall-edge avoidance — max-distance criterion
+--------------------------------------------
+An earlier revision of this penalty excluded any wall edge within
+WALL_EDGE_ANCHOR_TRIM of the leader's own anchor.  That was wrong: an
+anchor at v = 0 sits exactly on a wall's z_lo edge, and a mode-2
+horizontal leg leaves the anchor along that same edge — so the
+exclusion was silently swallowing the one case we care about most.
+
+The current criterion has no anchor trim.  Instead, for every
+near-horizontal leader segment, `_wallEdgeOverlapPenalty` samples the
+leader across its x-overlap with each wall edge and looks at the
+*maximum* distance from the edge.  Only if the maximum is under
+SEG_MIN_SEP — i.e. the leader never strays more than a line-width from
+the edge — is the contact counted.  A perpendicular-ish crossing enters
+and leaves the edge's neighbourhood within the overlap, so its max
+distance is much larger than SEG_MIN_SEP and it is correctly ignored.
+
+Wall-edge contacts share the wire-parallel tier: in a black-and-white
+render a leader parked one line-width below a wall chunk's bottom edge
+is exactly as unreadable as a leader running alongside the wire.
 """
+
 
 EXPORT_JS = r"""
 /* ==========================================================================
-   CABLE RUN EXPORT
-   ==========================================================================
-   Renders one diagram per true cable — a flattened schematic of the cable's
-   physical route through the room.
-
-   Layout, top to bottom:
-     - Title row (single line): cable id on the left, summary on the right.
-     - Strip band.  Fixed visual height (~130 px) regardless of the room's
-       real WALL_HEIGHT, with a small cm axis on the left showing 0, half,
-       ceiling.  Each wall chunk is drawn as a *band* spanning only the
-       segment's z_lo–z_hi range.  Step-face risers appear as short bands at
-       the bottom; segments bounded by openings appear as short bands at
-       their z_lo..z_hi.  Void areas where no wall exists are light gray.
-     - Top-channel band.  Reserved vertical space for leader horizontal
-       legs; slots are bin-packed.
-     - Vertex-label band.  Anchors on the strip carry a *named* pill:
-
-           V<n>  h <height>
-           W <dW> · E <dE>
-
-       where:
-         * V<n> — unique per pill, numbered by the cluster's earliest
-                  anchor position in the linearized cable order.  Coincident
-                  anchors at a shared corner share one name and merge into
-                  a single taller pill.
-         * h    — the anchor's height above the floor, in cm.
-         * W/E  — the wall's two sides as drawn in the strip: W is the
-                  visual-left edge of the chunk, E is the visual-right edge.
-         * dW   — perpendicular (in strip: horizontal, i.e. along-wall)
-                  distance from the vertex to the chunk's visual-left edge,
-                  in cm.
-         * dE   — same, to the chunk's visual-right edge.
-
-       Within a merged pill, the wall that visually lies to the left of the
-       corner is listed first.
-     - Row region: info panel (left) | plan (middle) | badge column (right).
-
-   Strip layout (nonlinear compression):
-     Chunks are laid out edge-to-edge.  A chunk's drawn width is
-     max(L_k · s, MIN_CHUNK_PX), where s is a single base scale solved so
-     that the total drawn width exactly fills the available strip area.
-     Short chunks therefore stay legible and their badges don't overlap;
-     long chunks share the leftover space proportionally.
-
-     Anchors inside a chunk use the chunk's LOCAL scale W_k / L_k, so
-     adjacent chunks agree on the x-coordinate of their shared boundary,
-     and shared corners still cluster into one pill.
-
-   Pill placement:
-     Pills are placed in horizontal tracks.  A pill in track T > 0 has a
-     descent that passes through tracks 0..T-1, so it must clear each pill
-     in those lower tracks by CROSS_MARGIN.  Same-track pills are separated
-     by TRACK_GAP_X, wide enough that a descent can thread between two
-     same-track pills.
-
-     Track selection is score-based, not first-fit:
-         score = |x − anchorCx|  +  track_index × TRACK_PENALTY
-
-     Per-track heights: track T's height is the maximum pill height it
-     contains plus TRACK_V_GAP.
-
-     After placement, each track is bubble-refined: adjacent pills whose
-     x-order contradicts their anchor x-order are swapped when both positions
-     remain valid AND neither swap raises a pill's displacement from its own
-     anchor by more than DISP_CAP_SWAP.
-
-   Leader routing — descents never share a path, never cross a pill:
-     A leader runs (anchorX, anchorY) → (anchorX + offA, chanY) →
-     (pillCenterX, chanY) → (pillCenterX, pillTopY).  The pill descent is
-     VERTICAL at pillCenterX.  The anchor descent carries a small x-offset
-     (offA) chosen by iterative relaxation.
-
-     Why the pill descent is always vertical: the placement algorithm
-     reserves a corridor of `other.w/2 + CROSS_MARGIN` around every lower-
-     track pill's center, and same-track pills are separated by
-     (w1+w2)/2 + TRACK_GAP_X.  So no two pills share pillCenterX, and two
-     vertical descents at their respective centers are already ≥ 45 px
-     apart.  Slanting a pill descent could push it into an intermediate
-     pill box; keeping it vertical is the only state the placement
-     algorithm actually guaranteed.  There is no scenario where two pill
-     descents overlap, so no offset is needed.
-
-     Anchor descents can share a path (multiple anchors at the same
-     anchorCx, common when several cables hit a wall at the same horizontal
-     position).  They are relaxed apart: conflicting pairs are pushed by
-     FAN_STEP in opposite x-directions until no two anchor descents sit
-     within MIN_SEP of each other, or MAX_OFFSET is reached.
-
-     Even after the offset relaxation, residual collisions can survive —
-     verticals sharing an x-axis, diagonals (from bevels or jogs) crossing
-     another leader's segment, or corners of two leaders ending up visually
-     adjacent.  All three are handled by a single coordinate-descent
-     optimiser that drives four per-leader tunables:
-
-         bevel0  — chamfer size at the bottom of the anchor descent
-         bevel1  — chamfer size at the top of the pill descent
-         jog0    — lateral Z-jog displacement in the anchor descent
-         jog1    — lateral Z-jog displacement in the pill descent
-
-     Every pass, the optimiser evaluates every single-parameter move and
-     keeps whichever reduces the composite penalty.  Nothing about "which
-     direction" or "which parameter" is hard-coded — the search discovers
-     whatever combination clears the most conflicts.
-
-   Dead zones — no spikes, no hooks:
-
-     Both bevels and jogs have a HARD MINIMUM APPLIED SIZE below which
-     they are simply not applied:
-
-         BEVEL_MIN_APPLY  — a chamfer smaller than this stays a sharp
-                            corner; a sub-6px chamfer reads as visual noise
-                            (a tiny 2-pixel spike near the corner), not as
-                            a deliberate 45° bevel.
-         JOG_MIN_APPLY    — a Z-jog smaller than this stays a straight
-                            vertical; a sub-6px jog reads as a hook or bump,
-                            not as a deliberate detour.  Additionally, a
-                            jog requires the segment to be at least 4·|s|
-                            long so the trapezoid's middle run is not a
-                            degenerate stub.
-
-     The optimiser never proposes values inside a dead zone.  The candidate
-     generator works like this:
-
-         cur = 0 :  { +MIN }                (bevels)
-                    { +MIN, −MIN }          (jogs)   — a "first step" jump
-         cur ≠ 0 :  { cur ± STEP, 0 }       — with ±STEP snapped to 0 if it
-                                              would land in the dead zone
-
-     The critical detail is the cur = 0 case: with STEP < MIN (e.g. 3 < 6),
-     a naive snap would collapse `0 + STEP` back to `0`, leaving the
-     optimiser permanently stuck.  Adding MIN (and −MIN for jogs) as an
-     explicit candidate gives the optimiser a legal first move.
-
-     `_cornerFeature` applies the same threshold, so the penalty function's
-     view of a corner (short bevel segment vs. sharp point) exactly matches
-     what the renderer will draw.  Score and render never disagree.
-
-   Composite penalty — three tiers, lexicographic:
-
-     (1) VERTICAL-VERTICAL OVERLAP.  Two near-vertical segments of
-         different leaders within SEG_MIN_SEP in x, overlapping in y.
-         Weighted ×1e12 — dominates everything else.
-
-     (2) OTHER SEGMENT COLLISION.  Any two segments of different leaders
-         within SEG_MIN_SEP, one or both non-horizontal.  Weighted ×1e9.
-
-     (3) CORNER/BEVEL EXCLUSION ZONE.  Every leader contributes two "corner
-         features": either the chamfer diagonal (if beveled above
-         BEVEL_MIN_APPLY) or the sharp corner point (otherwise).  Every
-         pair of corner features from different leaders, and every corner
-         feature vs. every segment from a different leader, is checked
-         against CORNER_MIN_DIST.  Weighted ×1e6.
-
-     The fallback for genuine crossings the optimiser cannot resolve by
-     geometry alone is the 2-coloured solid / dashed leader styling,
-     driven by a conflict graph.
-
-   Export format: PNG + per-cable JSON (v6), plus "Download all" buttons.
+   PRINT-FRIENDLY TEXTURES
    ========================================================================== */
 
-/* --------------------------------------------------------------------------
-   Toggleable display behaviours
-   --------------------------------------------------------------------------
+const _PATTERN_CANVASES = Object.create(null);
 
-   filterCollinearVerticesInStrip:
-       true  — anchors that merely sit on a straight visual run inside one
-               wall chunk are dropped from the pill labels.  Only the two
-               extremes of each straight run get a pill.  The strip's cable
-               line is still drawn through every anchor — this only thins
-               the vertex annotation.
-       false — every anchor gets its own pill (subject only to the existing
-               co-located clustering pass), i.e. the original behaviour.
-   -------------------------------------------------------------------------- */
-let filterCollinearVerticesInStrip = true;
-
-
-/* Collinearity filter.  Drops middle anchors of straight visual runs,
-   keeping only the two extremes of each run.
-
-   Scope and semantics:
-
-     * Per wall-run.  Different runs are separated by a visible gap ("⋯"),
-       so cross-run collinearity is incidental.
-
-     * Co-located anchors — a corner shared between two adjacent chunks, or
-       any two anchors within CO_LOC_TOL pixels of each other — are first
-       collapsed into a single cluster.  The filter then decides the fate of
-       the CLUSTER as one visual point.  If the cluster is collinear between
-       its neighbours, every member is dropped together.  This is what lets
-       a corner anchor (whose two co-located halves would each individually
-       look extremal) get filtered when it sits on a straight run.
-
-     * Filter order is CABLE ORDER, not strip x-order.  A cable that doubles
-       back along a wall (rightwards to a distant anchor, then leftwards to
-       a nearer one) draws its straight runs in cable order, not in x-order;
-       sorting by x would break those runs at the turnaround point.
-
-     * Tolerance is deliberately generous — this is a visual thinning pass,
-       not a numerical one.
-
-   The perpendicular-distance test uses the kept-previous cluster and the
-   immediate next original cluster (Douglas–Peucker style): once a cluster
-   is dropped, its neighbours' tests are re-evaluated against the surviving
-   line. */
-function _filterCollinearWallAnchors(rawAnchors, orderIdx) {
-  if (rawAnchors.length <= 2) return rawAnchors;
-
-  const CO_LOC_TOL       = 3.0;
-  const COLLINEAR_TOL_PX = 5.0;
-  const T_LO = 0.001, T_HI = 0.999;
-
-  const byRun = new Map();
-  for (const ra of rawAnchors) {
-    if (!byRun.has(ra.runIdx)) byRun.set(ra.runIdx, []);
-    byRun.get(ra.runIdx).push(ra);
-  }
-
-  const keptIds = new Set();
-
-  for (const runAnchors of byRun.values()) {
-    if (runAnchors.length <= 2) {
-      for (const ra of runAnchors) keptIds.add(ra.aid);
-      continue;
-    }
-
-    /* Co-location clustering.  Sort by x then y so anchors at the same
-       visual point end up adjacent. */
-    const sorted = [...runAnchors].sort((a, b) =>
-      (a.anchorCx - b.anchorCx) || (a.anchorCyRel - b.anchorCyRel)
-    );
-    const clusters = [];
-    let cur = null;
-    for (const ra of sorted) {
-      if (cur && Math.abs(ra.anchorCx - cur.cx) < CO_LOC_TOL
-              && Math.abs(ra.anchorCyRel - cur.cy) < CO_LOC_TOL) {
-        cur.members.push(ra);
-      } else {
-        cur = { cx: ra.anchorCx, cy: ra.anchorCyRel, members: [ra] };
-        clusters.push(cur);
-      }
-    }
-
-    /* Order clusters by cable order (earliest member's cable index). */
-    for (const cl of clusters) {
-      let minIdx = Infinity;
-      for (const m of cl.members) {
-        const oi = orderIdx ? orderIdx.get(m.aid) : undefined;
-        if (typeof oi === "number" && oi < minIdx) minIdx = oi;
-      }
-      cl.minOrderIdx = minIdx;
-    }
-    clusters.sort((a, b) => a.minOrderIdx - b.minOrderIdx);
-
-    if (clusters.length <= 2) {
-      for (const cl of clusters) for (const m of cl.members) keptIds.add(m.aid);
-      continue;
-    }
-
-    const kept = [clusters[0]];
-    for (let i = 1; i < clusters.length - 1; i++) {
-      const b = clusters[i];
-      const a = kept[kept.length - 1];
-      const c = clusters[i + 1];
-      const dx = c.cx - a.cx;
-      const dy = c.cy - a.cy;
-      const len2 = dx * dx + dy * dy;
-      if (len2 < 1e-12) { kept.push(b); continue; }
-      const len = Math.sqrt(len2);
-      const d = Math.abs((b.cx - a.cx) * dy - (b.cy - a.cy) * dx) / len;
-      const t = ((b.cx - a.cx) * dx + (b.cy - a.cy) * dy) / len2;
-      if (d < COLLINEAR_TOL_PX && t > T_LO && t < T_HI) continue;
-      kept.push(b);
-    }
-    kept.push(clusters[clusters.length - 1]);
-
-    for (const cl of kept) for (const m of cl.members) keptIds.add(m.aid);
-  }
-
-  return rawAnchors.filter(ra => keptIds.has(ra.aid));
+function _patternCanvas(kind) {
+  if (_PATTERN_CANVASES[kind]) return _PATTERN_CANVASES[kind];
+  const make = (size, draw) => {
+    const pc = document.createElement("canvas");
+    pc.width = pc.height = size;
+    const p = pc.getContext("2d");
+    p.fillStyle = "#ffffff";
+    p.fillRect(0, 0, size, size);
+    p.strokeStyle = "#000000";
+    p.fillStyle   = "#000000";
+    p.lineWidth   = 0.7;
+    p.lineCap     = "round";
+    draw(p, size);
+    return pc;
+  };
+  const defs = {
+    step: [8, (p, s) => {
+      p.lineWidth = 0.7;
+      p.beginPath();
+      p.moveTo(-1, s + 1);     p.lineTo(s + 1, -1);
+      p.moveTo(-1, 1);         p.lineTo(1, -1);
+      p.moveTo(s - 1, s + 1);  p.lineTo(s + 1, s - 1);
+      p.stroke();
+    }],
+    void: [12, (p, s) => {
+      p.lineWidth = 0.35;
+      p.beginPath();
+      p.moveTo(s + 1, -1);     p.lineTo(-1, s + 1);
+      p.stroke();
+    }],
+    roomInterior: [22, (p, s) => {
+      p.lineWidth = 0.4;
+      p.beginPath();
+      p.moveTo(-1, s + 1); p.lineTo(s + 1, -1);
+      p.stroke();
+    }],
+  };
+  const [size, draw] = defs[kind];
+  _PATTERN_CANVASES[kind] = make(size, draw);
+  return _PATTERN_CANVASES[kind];
 }
+
+function _pat(ctx, kind) {
+  return ctx.createPattern(_patternCanvas(kind), "repeat");
+}
+
+/* ==========================================================================
+   COLLINEAR VERTEX FILTER TOGGLE
+   ========================================================================== */
+
+window.filterCollinearVerticesInStrip = false;
+
+function _collapseStripCollinear(orderedIds) {
+  if (!window.filterCollinearVerticesInStrip) return orderedIds.slice();
+  if (orderedIds.length < 3) return orderedIds.slice();
+
+  const out = [orderedIds[0]];
+  for (let i = 1; i < orderedIds.length - 1; i++) {
+    const prevId = out[out.length - 1];
+    const curId  = orderedIds[i];
+    const nextId = orderedIds[i + 1];
+    const pa = anchors.get(prevId);
+    const ca = anchors.get(curId);
+    const na = anchors.get(nextId);
+    if (!pa || !ca || !na ||
+        pa.space !== "wall-edge" ||
+        ca.space !== "wall-edge" ||
+        na.space !== "wall-edge" ||
+        pa.segIdx !== ca.segIdx ||
+        ca.segIdx !== na.segIdx) {
+      out.push(curId);
+      continue;
+    }
+    const pu = wallAttachToU(pa.segIdx, pa.t), pv = pa.v || 0;
+    const cu = wallAttachToU(ca.segIdx, ca.t), cv = ca.v || 0;
+    const nu = wallAttachToU(na.segIdx, na.t), nv = na.v || 0;
+    const dx1 = cu - pu, dy1 = cv - pv;
+    const dx2 = nu - cu, dy2 = nv - cv;
+    const cross = Math.abs(dx1 * dy2 - dy1 * dx2);
+    const len = Math.hypot(dx2, dy2) || 1;
+    const dist = cross / len;
+    if (dist < 2.0) {
+      /* skip curId */
+    } else {
+      out.push(curId);
+    }
+  }
+  out.push(orderedIds[orderedIds.length - 1]);
+  return out;
+}
+
+/* ==========================================================================
+   CABLE RUN EXPORT
+   ========================================================================== */
 
 /* ---- Linearization ---- */
 
@@ -606,11 +503,11 @@ function drawBadge(c, x, y, num) {
   c.arc(x, y, r, 0, Math.PI * 2);
   c.fillStyle = "#ffffff";
   c.fill();
-  c.strokeStyle = "#1e293b";
+  c.strokeStyle = "#000000";
   c.lineWidth = 1.6;
   c.stroke();
   c.font = "700 12px ui-monospace, monospace";
-  c.fillStyle = "#0f172a";
+  c.fillStyle = "#000000";
   c.textAlign = "center"; c.textBaseline = "middle";
   c.fillText(String(num), x, y + 0.5);
   c.restore();
@@ -638,101 +535,83 @@ function styleFor(order) {
 function drawArrowHead(c, x, y, ux, uy, style) {
   const px = -uy, py = ux;
   c.save();
-  c.fillStyle = "#1e293b";
-  c.strokeStyle = "#1e293b";
-  c.lineWidth = 1.6;
   c.lineJoin = "round";
+  c.lineCap = "round";
+
+  const drawSilhouette = () => {
+    c.beginPath();
+    switch (style.head) {
+      case "solid-tri":
+      case "hollow-tri": {
+        const s = 8, w = 4.5;
+        c.moveTo(x, y);
+        c.lineTo(x - ux * s + px * w, y - uy * s + py * w);
+        c.lineTo(x - ux * s - px * w, y - uy * s - py * w);
+        c.closePath();
+        break;
+      }
+      case "solid-circle":
+      case "hollow-circle": {
+        c.arc(x, y, 4.5, 0, Math.PI * 2);
+        break;
+      }
+      case "solid-diamond":
+      case "hollow-diamond": {
+        const s = 5.5;
+        c.moveTo(x + ux * s, y + uy * s);
+        c.lineTo(x + px * s, y + py * s);
+        c.lineTo(x - ux * s, y - uy * s);
+        c.lineTo(x - px * s, y - py * s);
+        c.closePath();
+        break;
+      }
+      case "solid-square":
+      case "hollow-square": {
+        const s = 4;
+        c.moveTo(x + ux * s + px * s, y + uy * s + py * s);
+        c.lineTo(x + ux * s - px * s, y + uy * s - py * s);
+        c.lineTo(x - ux * s - px * s, y - uy * s - py * s);
+        c.lineTo(x - ux * s + px * s, y - uy * s + py * s);
+        c.closePath();
+        break;
+      }
+      case "bar": {
+        const s = 5.5;
+        c.moveTo(x + px * s, y + py * s);
+        c.lineTo(x - px * s, y - py * s);
+        break;
+      }
+    }
+  };
+
+  drawSilhouette();
+  c.strokeStyle = "#ffffff";
+  c.lineWidth = 5;
+  c.stroke();
+
+  c.strokeStyle = "#000000";
+  c.lineWidth = 1.6;
+  drawSilhouette();
 
   switch (style.head) {
-    case "solid-tri": {
-      const s = 8, w = 4.5;
-      c.beginPath();
-      c.moveTo(x, y);
-      c.lineTo(x - ux * s + px * w, y - uy * s + py * w);
-      c.lineTo(x - ux * s - px * w, y - uy * s - py * w);
-      c.closePath();
-      c.fill();
-      break;
-    }
-    case "hollow-tri": {
-      const s = 8, w = 4.5;
-      c.beginPath();
-      c.moveTo(x, y);
-      c.lineTo(x - ux * s + px * w, y - uy * s + py * w);
-      c.lineTo(x - ux * s - px * w, y - uy * s - py * w);
-      c.closePath();
-      c.fillStyle = "#ffffff";
-      c.fill();
-      c.stroke();
-      break;
-    }
-    case "solid-circle": {
-      c.beginPath();
-      c.arc(x, y, 4.5, 0, Math.PI * 2);
-      c.fill();
-      break;
-    }
-    case "hollow-circle": {
-      c.beginPath();
-      c.arc(x, y, 4.5, 0, Math.PI * 2);
-      c.fillStyle = "#ffffff";
-      c.fill();
-      c.stroke();
-      break;
-    }
-    case "solid-diamond": {
-      const s = 5.5;
-      c.beginPath();
-      c.moveTo(x + ux * s, y + uy * s);
-      c.lineTo(x + px * s, y + py * s);
-      c.lineTo(x - ux * s, y - uy * s);
-      c.lineTo(x - px * s, y - py * s);
-      c.closePath();
-      c.fill();
-      break;
-    }
-    case "hollow-diamond": {
-      const s = 5.5;
-      c.beginPath();
-      c.moveTo(x + ux * s, y + uy * s);
-      c.lineTo(x + px * s, y + py * s);
-      c.lineTo(x - ux * s, y - uy * s);
-      c.lineTo(x - px * s, y - py * s);
-      c.closePath();
-      c.fillStyle = "#ffffff";
-      c.fill();
-      c.stroke();
-      break;
-    }
+    case "solid-tri":
+    case "solid-circle":
+    case "solid-diamond":
     case "solid-square": {
-      const s = 4;
-      c.beginPath();
-      c.moveTo(x + ux * s + px * s, y + uy * s + py * s);
-      c.lineTo(x + ux * s - px * s, y + uy * s - py * s);
-      c.lineTo(x - ux * s - px * s, y - uy * s - py * s);
-      c.lineTo(x - ux * s + px * s, y - uy * s + py * s);
-      c.closePath();
+      c.fillStyle = "#000000";
       c.fill();
       break;
     }
+    case "hollow-tri":
+    case "hollow-circle":
+    case "hollow-diamond":
     case "hollow-square": {
-      const s = 4;
-      c.beginPath();
-      c.moveTo(x + ux * s + px * s, y + uy * s + py * s);
-      c.lineTo(x + ux * s - px * s, y + uy * s - py * s);
-      c.lineTo(x - ux * s - px * s, y - uy * s - py * s);
-      c.lineTo(x - ux * s + px * s, y - uy * s + py * s);
-      c.closePath();
       c.fillStyle = "#ffffff";
       c.fill();
       c.stroke();
       break;
     }
     case "bar": {
-      const s = 5.5;
-      c.beginPath();
-      c.moveTo(x + px * s, y + py * s);
-      c.lineTo(x - px * s, y - py * s);
       c.stroke();
       break;
     }
@@ -821,7 +700,7 @@ function drawStyledPath(c, points, style, gapStart) {
   }
 
   c.save();
-  c.strokeStyle = "#1e293b";
+  c.strokeStyle = "#000000";
   c.lineWidth = 1.4;
   c.lineCap = "round";
   c.lineJoin = "round";
@@ -854,26 +733,8 @@ const LEADER_STYLES = [
   { dash: [6, 4] },
 ];
 
-/* ---- Leader offset refinement ----
+/* ---- Leader offset refinement ---- */
 
-   Anchor descents can share a path (multiple anchors at the same anchorCx,
-   common when several cables hit a wall at the same horizontal position).
-   We give each anchor descent a small per-leader x-offset, chosen by
-   iterative relaxation: any two anchor descents whose paths still conflict
-   are pushed apart in x by FAN_STEP per pass until no conflict remains or
-   MAX_OFFSET is reached.
-
-   The pill descent is NOT offset — it always runs vertically at
-   pillCenterX.  This is what guarantees no leader ever passes behind a
-   pill:
-     * The placement algorithm reserved a corridor of
-       `other.w/2 + CROSS_MARGIN` around every lower-track pill's center,
-       so a vertical descent at pillCenterX is provably clear of every
-       other pill's box by construction.
-     * Same-track pills are separated by TRACK_GAP_X, so no two pills
-       share pillCenterX, so no two vertical pill descents can overlap.
-   There is therefore neither a need nor a safe way to offset the pill
-   descent. */
 function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
   const MIN_SEP    = 3.0;
   const FAN_STEP   = 4.0;
@@ -883,13 +744,10 @@ function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
   if (!placed) return;
   for (const it of placed) {
     it.offsetA = 0;
-    it.offsetP = 0;   // always — pill descent stays vertical
+    it.offsetP = 0;
   }
   if (placed.length < 2) return;
 
-  /* Anchor descents live in [anchorCyRel - stripH, channelYRel] relative
-     to stripBottom (anchorCyRel is measured downward from stripY, so it is
-     negative relative to stripBottom; channelYRel is positive). */
   for (const it of placed) {
     it._anchorYRel = it.anchorCyRel - stripH;
     it._chanYRel   = it.channelYRel;
@@ -936,7 +794,6 @@ function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
     if (!anyChange) break;
   }
 
-  /* Slant cap: |offsetA| ≤ 0.5 × anchor descent height. */
   for (const it of placed) {
     const h = it._chanYRel - it._anchorYRel;
     const cap = Math.min(MAX_OFFSET, Math.max(0, h * 0.5));
@@ -944,17 +801,13 @@ function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
   }
 }
 
-/* ---- Segment collision detection ----
-
-   Any two segments — from different leaders, any orientation except two
-   horizontals — that come within SEG_MIN_SEP pixels of each other are a
-   visual collision.  Two horizontals are excluded because the channel-slot
-   mechanism already separates them by LABEL_CHANNEL_STEP. */
+/* ---- Segment collision detection ---- */
 
 const SEG_MIN_SEP  = 6.0;
 const SEG_MIN_LEN  = 5.0;
 
-/* Point-to-segment distance. */
+const PARALLEL_TOL = Math.PI / 12;
+
 function _pointSegDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay;
   const len2 = dx*dx + dy*dy;
@@ -964,7 +817,6 @@ function _pointSegDist(px, py, ax, ay, bx, by) {
   return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
 }
 
-/* Segment-to-segment minimum distance. */
 function _segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
   return Math.min(
     _pointSegDist(ax, ay, cx, cy, dx, dy),
@@ -974,8 +826,6 @@ function _segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
   );
 }
 
-/* Decompose a path into segments with metadata.  Excludes segments
-   shorter than minLen (they are too small to matter visually). */
 function _pathSegments(path, pathIdx, minLen) {
   const out = [];
   for (let i = 0; i < path.length - 1; i++) {
@@ -992,13 +842,12 @@ function _pathSegments(path, pathIdx, minLen) {
       ax: a[0], ay: a[1], bx: b[0], by: b[1],
       minX: Math.min(a[0], b[0]), maxX: Math.max(a[0], b[0]),
       minY: Math.min(a[1], b[1]), maxY: Math.max(a[1], b[1]),
+      angle: Math.atan2(dy, dx),
     });
   }
   return out;
 }
 
-/* Return every pair of segments from different paths whose distance is
-   less than minSep.  Both-horizontal pairs are skipped. */
 function _findSegmentConflicts(segs, minSep) {
   const out = [];
   for (let i = 0; i < segs.length; i++) {
@@ -1019,49 +868,210 @@ function _findSegmentConflicts(segs, minSep) {
   return out;
 }
 
-/* ---- Corner features and exclusion zones ----
+/* ---- Wall-section boundary collision ----
 
-   Every leader contributes two "corner features": the geometric region
-   occupied by its first interior corner (bottom of the anchor descent) and
-   by its last interior corner (top of the pill descent).
+   Vertical boundaries between wall chunks.  Same shape as the wall-edge
+   penalty, but mirrored: the leader must be near-vertical for the check
+   to apply, and the boundary is a vertical line rather than a horizontal
+   one. */
 
-   If the corner is beveled ABOVE BEVEL_MIN_APPLY, the feature is the bevel
-   DIAGONAL (a short segment); otherwise it is the sharp corner POINT.  The
-   threshold matters because a sub-6px bevel is not applied by _bevelPath,
-   so the corner stays sharp — the feature must reflect that.
+function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
+  let count = 0, depth = 0;
+  if (!boundaries || !boundaries.length) return { count, depth };
 
-   Corner features are computed directly from the item's tunables — not by
-   indexing into the final path — because jogs insert points at arbitrary
-   positions, so path indices are unreliable.
+  const SLOPE_MAX = 0.4;
 
-   The exclusion-zone rule: no two corner features from different leaders
-   may come within CORNER_MIN_DIST of each other; and no corner feature may
-   come within CORNER_MIN_DIST of a segment of a different leader. */
+  for (const s of leaderSegs) {
+    const dy = s.by - s.ay;
+    if (Math.abs(dy) < 1e-6) continue;
+    const slope = Math.abs((s.bx - s.ax) / dy);
+    if (slope > SLOPE_MAX) continue;
+
+    const yLo = Math.max(s.minY, 0);
+    const yHi = Math.min(s.maxY, stripH);
+    if (yHi - yLo < SEG_MIN_LEN) continue;
+
+    const dx = s.bx - s.ax;
+    for (const bx of boundaries) {
+      if (s.maxX + SEG_MIN_SEP < bx) continue;
+      if (s.minX - SEG_MIN_SEP > bx) continue;
+
+      let sumDist = 0;
+      const N = 5;
+      for (let k = 0; k <= N; k++) {
+        const y = yLo + (yHi - yLo) * k / N;
+        const t = (y - s.ay) / dy;
+        const x = s.ax + dx * t;
+        sumDist += Math.abs(x - bx);
+      }
+      const avgDist = sumDist / (N + 1);
+      if (avgDist < SEG_MIN_SEP) {
+        count++;
+        depth += (SEG_MIN_SEP - avgDist);
+      }
+    }
+  }
+  return { count, depth };
+}
+
+/* ---- Cable-wire collision ----
+
+   The strip's wire is a polyline that runs through every wall-edge
+   anchor of the cable, in order.  Leaders leave an anchor and dive into
+   the channel below the strip; a leader segment that comes within
+   SEG_MIN_SEP of a wire segment is penalised — except when the wire
+   segment belongs to the leader's own anchor (a leader always starts
+   *on* the wire at its anchor, so proximity there is expected).
+
+   Every contact is further classified as *parallel* or *crossing* by
+   comparing segment inclinations.  A parallel contact is weighted an
+   order of magnitude above a crossing. */
+
+const WIRE_ANCHOR_TRIM = 8.0;
+
+function _angleDiff(a, b) {
+  let d = Math.abs(a - b) % Math.PI;
+  if (d > Math.PI / 2) d = Math.PI - d;
+  return d;
+}
+
+function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
+  let count = 0, depth = 0;
+  let parCount = 0, parDepth = 0;
+  if (!wireSegments || !wireSegments.length)
+    return { count, depth, parCount, parDepth };
+
+  for (const s of leaderSegs) {
+    const it = placed[s.pathIdx];
+    if (!it) continue;
+    const ax = it.anchorCx;
+    const ay = it.anchorCyRel;
+    const sAngle = s.angle;
+
+    for (const w of wireSegments) {
+      const wminX = Math.min(w.ax, w.bx);
+      const wmaxX = Math.max(w.ax, w.bx);
+      const wminY = Math.min(w.ay, w.by);
+      const wmaxY = Math.max(w.ay, w.by);
+
+      if (s.maxX + SEG_MIN_SEP < wminX) continue;
+      if (wmaxX + SEG_MIN_SEP < s.minX) continue;
+      if (s.maxY + SEG_MIN_SEP < wminY) continue;
+      if (wmaxY + SEG_MIN_SEP < s.minY) continue;
+
+      const dAnchor = _pointSegDist(ax, ay, w.ax, w.ay, w.bx, w.by);
+      if (dAnchor < WIRE_ANCHOR_TRIM) continue;
+
+      const d = _segSegDist(s.ax, s.ay, s.bx, s.by,
+                            w.ax, w.ay, w.bx, w.by);
+      if (d < SEG_MIN_SEP) {
+        count++;
+        depth += (SEG_MIN_SEP - d);
+
+        const wAngle = Math.atan2(w.by - w.ay, w.bx - w.ax);
+        if (_angleDiff(sAngle, wAngle) < PARALLEL_TOL) {
+          parCount++;
+          parDepth += (SEG_MIN_SEP - d);
+        }
+      }
+    }
+  }
+  return { count, depth, parCount, parDepth };
+}
+
+/* ---- Wall-edge collision ----
+
+   Every drawn wall chunk in the strip is a rectangle; its top edge is
+   z_hi mapped to strip y, its bottom edge is z_lo mapped to strip y.
+   The strip also has two outer rules — the ceiling dashed line at y = 0
+   and the floor dashed line at y = stripH — that bound the whole band.
+
+   The criterion is the MAXIMUM distance from the leader to the edge over
+   the x-overlap, not the average.  A perpendicular-ish crossing enters
+   and leaves the edge's neighbourhood within the overlap, so its max
+   distance far exceeds SEG_MIN_SEP and it is ignored.  A run-along
+   leader — even one that starts *on* the edge at its own anchor, which
+   is exactly what dive mode 2 produces for a floor-level anchor — has
+   max distance close to zero and is penalised.
+
+   This deliberately has no "anchor trim" exclusion.  An earlier
+   revision skipped any edge within 8 px of the leader's anchor, which
+   silently swallowed the case we most care about: an anchor at v = 0
+   sits exactly on a wall's z_lo edge, and a mode-2 horizontal leg
+   leaves the anchor along that very edge. */
+
+function _wallEdgeOverlapPenalty(leaderSegs, wallEdges) {
+  let count = 0, depth = 0;
+  if (!wallEdges || !wallEdges.length) return { count, depth };
+
+  const SLOPE_MAX = 0.4;
+
+  for (const s of leaderSegs) {
+    const dx = s.bx - s.ax;
+    const dy = s.by - s.ay;
+    if (Math.abs(dx) < 1e-6) continue;
+    const slope = Math.abs(dy / dx);
+    if (slope > SLOPE_MAX) continue;
+
+    for (const we of wallEdges) {
+      const xLo = Math.max(s.minX, we.x0);
+      const xHi = Math.min(s.maxX, we.x1);
+      if (xHi - xLo < 2 * SEG_MIN_LEN) continue;
+
+      if (s.minY - SEG_MIN_SEP > we.y) continue;
+      if (s.maxY + SEG_MIN_SEP < we.y) continue;
+
+      let maxDist = 0;
+      let sumDist = 0;
+      const N = 5;
+      for (let k = 0; k <= N; k++) {
+        const x = xLo + (xHi - xLo) * k / N;
+        const t = (x - s.ax) / dx;
+        const y = s.ay + dy * t;
+        const d = Math.abs(y - we.y);
+        if (d > maxDist) maxDist = d;
+        sumDist += d;
+      }
+      if (maxDist < SEG_MIN_SEP) {
+        count++;
+        depth += (SEG_MIN_SEP - sumDist / (N + 1));
+      }
+    }
+  }
+  return { count, depth };
+}
+
+/* ---- Corner features and exclusion zones ---- */
 
 const CORNER_MIN_DIST = 24.0;
 
-function _cornerFeature(it, which, stripH, topPad, trackOffsets) {
-  const chanY     = stripH + (it.channelYRel || 0);
-  const pillTopY  = stripH + topPad + trackOffsets[it.track];
-  const offA      = it.offsetA || 0;
+function _cornerFeature(it, placed, stripH, topPad, trackOffsets, which) {
+  const anchorY  = it.anchorCyRel;
+  const chanY    = stripH + (it.channelYRel || 0);
+  const pillTopY = stripH + topPad + trackOffsets[it.track];
+  const basePath = computeLeaderPath(
+    it.anchorCx, anchorY, it.offsetA || 0,
+    chanY, it.pillCenterX, pillTopY,
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
+
+  if (basePath.length < 3) {
+    const p = basePath[0] || [0, 0];
+    return { x0: p[0], y0: p[1], x1: p[0], y1: p[1] };
+  }
 
   let A, C, N, b;
   if (which === 0) {
-    A = [it.anchorCx, it.anchorCyRel];
-    C = [it.anchorCx + offA, chanY];
-    N = [it.pillCenterX, chanY];
+    A = basePath[0];
+    C = basePath[1];
+    N = basePath[2];
     b = it.bevel0 || 0;
   } else {
-    A = [it.anchorCx + offA, chanY];
-    C = [it.pillCenterX, chanY];
-    N = [it.pillCenterX, pillTopY];
+    A = basePath[basePath.length - 3];
+    C = basePath[basePath.length - 2];
+    N = basePath[basePath.length - 1];
     b = it.bevel1 || 0;
   }
 
-  /* Mirror _bevelPath's applied threshold exactly: below BEVEL_MIN_APPLY
-     (either because the requested bevel is small, or because a short
-     adjacent segment clips it), the corner stays sharp and the feature is
-     a point. */
   if (b < BEVEL_MIN_APPLY) {
     return { x0: C[0], y0: C[1], x1: C[0], y1: C[1] };
   }
@@ -1078,8 +1088,6 @@ function _cornerFeature(it, which, stripH, topPad, trackOffsets) {
   return { x0: p1[0], y0: p1[1], x1: p2[0], y1: p2[1] };
 }
 
-/* Minimum distance between two corner features.  Both are either a point
-   or a short segment. */
 function _cornerDist(fA, fB) {
   const aIsPt = (Math.abs(fA.x0 - fA.x1) < 0.5 && Math.abs(fA.y0 - fA.y1) < 0.5);
   const bIsPt = (Math.abs(fB.x0 - fB.x1) < 0.5 && Math.abs(fB.y0 - fB.y1) < 0.5);
@@ -1096,50 +1104,72 @@ function _cornerDist(fA, fB) {
                      fB.x0, fB.y0, fB.x1, fB.y1);
 }
 
-/* ---- Leader geometry optimiser ----
-
-   The heart of the collision-resolution stage.  Four per-leader tunables
-   are optimised together:
-
-       bevel0  — corner chamfer at the bottom of the anchor descent
-       bevel1  — corner chamfer at the top of the pill descent
-       jog0    — lateral Z-jog applied to the anchor descent
-       jog1    — lateral Z-jog applied to the pill descent
-
-   Every pass, the optimiser evaluates every single-parameter move and
-   keeps whichever reduces the composite penalty.  Moves are snapped to
-   the dead-zone-free domain: a parameter is either 0 or has magnitude
-   ≥ MIN_APPLY.  Sub-perceptible values are never proposed.
-
-   The reset-to-zero escape hatch matters: without it the optimiser can get
-   stuck in a local minimum where growing a parameter further doesn't help,
-   but *discarding* it opens a different path to a cleaner state.
-
-   Composite penalty has three tiers, weighted lexicographically so the
-   optimiser never trades a higher-tier improvement for a lower-tier one:
-
-       tier 1  vertical-vertical overlaps            ×1e12
-       tier 2  other segment-segment collisions      ×1e9
-       tier 3  corner-feature exclusion violations   ×1e6
-
-   Within a tier, both the count of violations and the summed penetration
-   depth contribute — so the optimiser prefers configurations that push
-   lines further apart, not just ones that cross the threshold.
-
-   Terminates when no single-parameter move improves the score, or after
-   OPT_MAX_PASSES.  The residual unresolved conflicts, if any, are handled
-   at draw time by the 2-coloured solid / dashed leader styling. */
+/* ---- Leader geometry optimiser ---- */
 
 const BEVEL_STEP      = 3.0;
 const BEVEL_MAX       = 45.0;
-const BEVEL_MIN_APPLY = 6.0;   /* below this, chamfer is not applied at all */
+const BEVEL_MIN_APPLY = 6.0;
 const JOG_STEP        = 3.0;
 const JOG_MAX         = 24.0;
-const JOG_MIN_APPLY   = 6.0;   /* below this, jog is not applied at all */
+const JOG_MIN_APPLY   = 6.0;
 const OPT_MAX_PASSES  = 30;
 
-/* Rebuild a leader's absolute path from the same inputs used by
-   drawVertexLabels, but in strip-relative coordinates (stripY = 0). */
+function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
+                              stripBottom, topPad, trackOffsets) {
+  const M = 4;
+  const out = [];
+  const blockers = [];
+  for (const Q of placed) {
+    if (Q === self) continue;
+    const qL = Q.pillCenterX - Q.w / 2;
+    const qR = Q.pillCenterX + Q.w / 2;
+    const qT = stripBottom + topPad + trackOffsets[Q.track];
+    const qB = qT + Q.h;
+    if (pillX > qL && pillX < qR && qB > chanY && qT < pillTopY) {
+      blockers.push({ qL, qR, qT, qB });
+    }
+  }
+  blockers.sort((a, b) => a.qT - b.qT);
+
+  let curY = chanY;
+  for (const b of blockers) {
+    if (b.qT <= curY) continue;
+    const distL = pillX - b.qL;
+    const distR = b.qR - pillX;
+    const detourX = (distR < distL) ? (b.qR + M) : (b.qL - M);
+    out.push([pillX,   b.qT - M]);
+    out.push([detourX, b.qT - M]);
+    out.push([detourX, b.qB + M]);
+    out.push([pillX,   b.qB + M]);
+    curY = b.qB + M;
+  }
+  out.push([pillX, pillTopY]);
+  return out;
+}
+
+function computeLeaderPath(anchorX, anchorY, offA, chanY, pillX, pillTopY,
+                           self, placed, stripBottom, topPad, trackOffsets,
+                           diveMode) {
+  const mode = diveMode || 0;
+  const path = [];
+  path.push([anchorX, anchorY]);
+  if (mode === 1) {
+    path.push([anchorX, chanY]);
+    path.push([pillX,   chanY]);
+  } else if (mode === 2) {
+    path.push([pillX, anchorY]);
+    path.push([pillX, chanY]);
+  } else {
+    path.push([anchorX + offA, chanY]);
+    path.push([pillX,          chanY]);
+  }
+
+  const tail = _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
+                                    stripBottom, topPad, trackOffsets);
+  for (const p of tail) path.push(p);
+  return path;
+}
+
 function _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets) {
   const anchorY  = it.anchorCyRel;
   const chanY    = stripH + it.channelYRel;
@@ -1147,23 +1177,9 @@ function _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets) {
   return computeLeaderPath(
     it.anchorCx, anchorY, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
 }
 
-/* Apply corner bevels to a leader path.  b0 = bevel size at the first
-   interior corner (bottom of the anchor descent); b1 = bevel size at the
-   last interior corner (top of the pill descent).  Middle points (from
-   pill detours) are preserved verbatim.
-
-   45° lock: the same cut length b is used on BOTH sides of the corner,
-   clipped uniformly to 85 % of the shorter adjacent segment.  Because
-   the adjacent segments are (near-)perpendicular, the chamfer lies at
-   45° to each axis.
-
-   Dead-zone guard: if the EFFECTIVE cut bU falls below BEVEL_MIN_APPLY —
-   either because the requested b is small, or because an adjacent segment
-   is too short for a meaningful chamfer — the corner stays SHARP.  This
-   is what prevents sub-6px "spike" chamfers from appearing. */
 function _bevelPath(path, b0, b1) {
   const n = path.length;
   if (n < 4) return path;
@@ -1171,7 +1187,6 @@ function _bevelPath(path, b0, b1) {
 
   const out = [path[0]];
 
-  /* First interior corner (index 1). */
   const A   = path[0];
   const C1  = path[1];
   const N1  = path[2];
@@ -1189,10 +1204,8 @@ function _bevelPath(path, b0, b1) {
     out.push(C1);
   }
 
-  /* Middle points unchanged. */
   for (let i = 2; i <= n - 3; i++) out.push(path[i]);
 
-  /* Last interior corner (index n-2). */
   const M2  = path[n - 3];
   const C2  = path[n - 2];
   const P   = path[n - 1];
@@ -1214,15 +1227,6 @@ function _bevelPath(path, b0, b1) {
   return out;
 }
 
-/* Replace a vertical segment of `points` with a 45° Z-jog.  Endpoints are
-   preserved.
-
-   Dead-zone guards:
-     - |shift| must be ≥ JOG_MIN_APPLY (a smaller jog reads as a hook).
-     - The segment must be at least 4·|shift| long, so the trapezoid's
-       middle run is at least 2·|shift| — a visibly deliberate detour,
-       not a degenerate stub.
-   Segments failing either guard are returned unchanged. */
 function _jogSegment(points, segIdx, shift) {
   if (!shift || Math.abs(shift) < JOG_MIN_APPLY) return points;
   const n = points.length;
@@ -1242,8 +1246,6 @@ function _jogSegment(points, segIdx, shift) {
     .concat([M1, M2], points.slice(segIdx + 1));
 }
 
-/* Apply the item's stored jogs to a path.  The anchor descent is segment
-   0; the pill descent is the last segment. */
 function _applyJogsToPath(path, it) {
   let p = path;
   if (it.jog0 && Math.abs(it.jog0) >= JOG_MIN_APPLY && p.length >= 2) {
@@ -1255,66 +1257,53 @@ function _applyJogsToPath(path, it) {
   return p;
 }
 
-/* Generate the set of legal candidate values for a parameter, given its
-   current value.  Only values OUTSIDE the dead zone are ever proposed:
-
-       bevels:  { 0 } ∪ [ BEVEL_MIN_APPLY, BEVEL_MAX ]
-       jogs:    { 0 } ∪ [ -JOG_MAX, -JOG_MIN_APPLY ] ∪ [ JOG_MIN_APPLY, JOG_MAX ]
-
-   The critical case is cur == 0: since STEP < MIN (3 < 6), a naive
-   `0 + STEP` would snap back to 0 and the optimiser would be permanently
-   stuck.  We therefore add ±MIN as explicit "first step" candidates when
-   cur is at 0.  From any nonzero value, ±STEP is safe because any move
-   that would land in the dead zone is snapped to 0 (a legal value).
-
-   Returns a Set (deduplicated) excluding the current value. */
 function _candidatesFor(cur, isBevel) {
   const step     = isBevel ? BEVEL_STEP : JOG_STEP;
   const maxV     = isBevel ? BEVEL_MAX  : JOG_MAX;
   const minV     = isBevel ? BEVEL_MIN_APPLY : JOG_MIN_APPLY;
-  const allowNeg = !isBevel;   /* jogs can be negative; bevels cannot */
+  const allowNeg = !isBevel;
 
   const set = new Set();
 
-  /* Snap a raw candidate into the legal domain {0} ∪ ±[minV, maxV].
-     Returns null if the value lands in the dead zone (0 < |v| < minV). */
   const snap = (v) => {
     if (v === 0) return 0;
     if (!allowNeg && v < 0) return null;
     const a = Math.abs(v);
-    if (a < minV) return null;             // dead zone → reject
+    if (a < minV) return null;
     const c = Math.min(maxV, a);
     return allowNeg ? Math.sign(v) * c : c;
   };
 
-  /* Normal ±step neighbours. */
   const s1 = snap(cur + step);
   const s2 = snap(cur - step);
   if (s1 !== null) set.add(s1);
   if (s2 !== null) set.add(s2);
 
-  /* If cur is at 0, the ±step neighbours land in the dead zone and get
-     rejected above; add ±MIN so the optimiser can actually leave 0. */
   if (cur === 0) {
     set.add(minV);
     if (allowNeg) set.add(-minV);
   }
 
-  /* Reset escape hatch: from any nonzero value, offer 0 as a candidate
-     so the optimiser can discard a move that turned out unhelpful. */
   if (cur !== 0) set.add(0);
 
   set.delete(cur);
   return set;
 }
 
-/* Coordinate-descent optimiser. */
-function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
+const DIVE_MODES = [0, 1, 2];
+
+function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
+                                boundaries, wireSegments, wallEdges) {
   for (const it of placed) {
     it.bevel0 = 0; it.bevel1 = 0;
     it.jog0   = 0; it.jog1   = 0;
+    it.diveMode = 0;
   }
   if (placed.length < 2) return;
+
+  const bxs   = Array.isArray(boundaries)   ? boundaries   : [];
+  const wires = Array.isArray(wireSegments) ? wireSegments : [];
+  const wes   = Array.isArray(wallEdges)    ? wallEdges    : [];
 
   function buildPaths() {
     return placed.map(it => {
@@ -1325,7 +1314,6 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
     });
   }
 
-  /* Composite penalty, weighted lexicographically across three tiers. */
   function evaluate() {
     const paths = buildPaths();
 
@@ -1336,7 +1324,7 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
       }
     }
 
-    /* --- tier 1: vertical-vertical overlaps --- */
+    /* --- tier 1: vertical-vertical overlaps (leader vs leader) --- */
     let vvCount = 0, vvDepth = 0;
     for (let i = 0; i < allSegs.length; i++) {
       const A = allSegs[i];
@@ -1355,15 +1343,32 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
       }
     }
 
-    /* --- tier 2: other segment-segment collisions --- */
+    /* --- tier 2: leader vs leader, any non-horizontal/non-horizontal pair --- */
     let segCount = 0, segDepth = 0;
     const segConflicts = _findSegmentConflicts(allSegs, SEG_MIN_SEP);
     for (const c of segConflicts) {
       const isVV = (c.a.kind === "vert" && c.b.kind === "vert");
-      if (isVV) continue;   // already counted in tier 1
+      if (isVV) continue;
       segCount++;
       segDepth += (SEG_MIN_SEP - c.dist);
     }
+
+    /* --- tier 2b: leader vs wall-section boundary --- */
+    const bPen = _boundaryOverlapPenalty(allSegs, bxs, stripH);
+    const bCount = bPen.count;
+    const bDepth = bPen.depth;
+
+    /* --- tier 2c: leader vs cable wire (parallel vs crossing split) --- */
+    const wPen = _wireOverlapPenalty(allSegs, placed, wires);
+    const wireCount    = wPen.count;
+    const wireDepth    = wPen.depth;
+    const wireParCount = wPen.parCount;
+    const wireParDepth = wPen.parDepth;
+
+    /* --- tier 2d: leader vs wall chunk edges (horizontal rules) --- */
+    const ePen = _wallEdgeOverlapPenalty(allSegs, wes);
+    const weCount = ePen.count;
+    const weDepth = ePen.depth;
 
     /* --- tier 3: corner-feature exclusion zones --- */
     const corners = [];
@@ -1371,17 +1376,16 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
       const it = placed[pi];
       corners.push({
         pathIdx: pi,
-        ..._cornerFeature(it, 0, stripH, topPad, trackOffsets),
+        ..._cornerFeature(it, placed, stripH, topPad, trackOffsets, 0),
       });
       corners.push({
         pathIdx: pi,
-        ..._cornerFeature(it, 1, stripH, topPad, trackOffsets),
+        ..._cornerFeature(it, placed, stripH, topPad, trackOffsets, 1),
       });
     }
 
     let cornerCount = 0, cornerDepth = 0;
 
-    /* Corner-to-corner */
     for (let i = 0; i < corners.length; i++) {
       for (let j = i + 1; j < corners.length; j++) {
         const A = corners[i], B = corners[j];
@@ -1394,7 +1398,6 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
       }
     }
 
-    /* Corner-to-segment (of a different leader) */
     for (const cf of corners) {
       const cfIsPt = (Math.abs(cf.x0 - cf.x1) < 0.5 &&
                       Math.abs(cf.y0 - cf.y1) < 0.5);
@@ -1414,10 +1417,22 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
       }
     }
 
+    /* Boundary collisions, wire collisions and leader-leader segment
+       collisions sit at the base tier.  Wire-parallel overlaps AND
+       wall-edge overlaps both sit one tier above: in a black-and-white
+       render, running alongside either is genuinely harder to read
+       than a crossing, because the eye cannot disentangle the two
+       strokes.  Sliding the leader cannot fix such an overlap, so the
+       tier is high enough to force the optimiser to consider a
+       dive-mode switch instead. */
     const score =
-      vvCount     * 1e12 + vvDepth     * 1e11 +
-      segCount    * 1e9  + segDepth    * 1e8  +
-      cornerCount * 1e6  + cornerDepth * 1e5;
+      vvCount      * 1e12 + vvDepth      * 1e11 +
+      wireParCount * 1e11 + wireParDepth * 1e10 +
+      weCount      * 1e11 + weDepth      * 1e10 +
+      segCount     * 1e9  + segDepth     * 1e8  +
+      bCount       * 1e9  + bDepth       * 1e8  +
+      wireCount    * 1e9  + wireDepth    * 1e8  +
+      cornerCount  * 1e6  + cornerDepth  * 1e5;
 
     return { score };
   }
@@ -1447,6 +1462,21 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
           }
         }
       }
+
+      const curMode = it.diveMode || 0;
+      for (const cand of DIVE_MODES) {
+        if (cand === curMode) continue;
+        const saved = it.diveMode;
+        it.diveMode = cand;
+        const test = evaluate();
+        it.diveMode = saved;
+
+        if (test.score < cur.score - 0.5) {
+          if (!best || test.score < best.test.score) {
+            best = { it, field: 'diveMode', newValue: cand, test };
+          }
+        }
+      }
     }
 
     if (!best) break;
@@ -1456,23 +1486,8 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets) {
   }
 }
 
-/* ---- Vertex coordinate labels (wall strip, below) ----
+/* ---- Vertex coordinate labels ---- */
 
-   Coincident anchors — the shared corner between two adjacent walls, which
-   the strip renders at the same visual point — are clustered and merged
-   into one pill.  Within a merged pill, the wall that visually lies to the
-   left of the corner comes first, the wall to the right second.
-
-   Each pill carries a name V<n> (n = the 1-based position of the cluster's
-   earliest anchor in the linearized cable order).  All members of a cluster
-   share the same name, and the name is written into the JSON output as
-   pillName on every anchor record.
-
-   Each wall's block inside a pill is:
-       V<n>  h <h>                      (first block only)
-       W <dW> · E <dE>
-   where "W" is the wall chunk's VISUAL-LEFT edge and "E" is its VISUAL-RIGHT
-   edge, both in the strip, and dW / dE are along-wall distances in cm. */
 function computeVertexLabelPlacement(c, chunks, stripOffsetX,
                                      stripAreaX0, stripAreaW, stripH,
                                      orderedIds) {
@@ -1492,19 +1507,75 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+  const boundaries = [];
+  const seenBx = new Set();
+  for (const ch of chunks) {
+    const cands = [stripOffsetX + ch.x0, stripOffsetX + ch.x1];
+    for (const bx of cands) {
+      const key = Math.round(bx * 2) / 2;
+      if (seenBx.has(key)) continue;
+      seenBx.add(key);
+      boundaries.push(bx);
+    }
+  }
+
+  const wireSegments = [];
+  {
+    const byRun = new Map();
+    for (const ch of chunks) {
+      let list = byRun.get(ch.runIdx);
+      if (!list) { list = []; byRun.set(ch.runIdx, list); }
+      list.push(ch);
+    }
+    for (const [, chList] of byRun) {
+      const flat = [];
+      for (const ch of chList) {
+        for (const a of ch.anchors) flat.push(a);
+      }
+      for (let i = 0; i < flat.length - 1; i++) {
+        const ax = stripOffsetX + flat[i].xPx;
+        const ay = flat[i].yPx;
+        const bx = stripOffsetX + flat[i + 1].xPx;
+        const by = flat[i + 1].yPx;
+        wireSegments.push({
+          ax, ay, bx, by,
+          angle: Math.atan2(by - ay, bx - ax),
+        });
+      }
+    }
+  }
+
+  const wallEdges = [];
+  {
+    let stripX0 = Infinity, stripX1 = -Infinity;
+    for (const ch of chunks) {
+      const x0 = stripOffsetX + ch.x0;
+      const x1 = stripOffsetX + ch.x1;
+      const yTop = (1 - ch.z_hi / WALL_HEIGHT) * stripH;
+      const yBot = (1 - ch.z_lo / WALL_HEIGHT) * stripH;
+      wallEdges.push({ y: yTop, x0, x1 });
+      wallEdges.push({ y: yBot, x0, x1 });
+      if (x0 < stripX0) stripX0 = x0;
+      if (x1 > stripX1) stripX1 = x1;
+    }
+    if (isFinite(stripX0) && isFinite(stripX1)) {
+      wallEdges.push({ y: 0,      x0: stripX0, x1: stripX1 });
+      wallEdges.push({ y: stripH, x0: stripX0, x1: stripX1 });
+    }
+  }
+
   const orderIdx = new Map();
   if (Array.isArray(orderedIds)) {
     orderedIds.forEach((id, i) => orderIdx.set(id, i));
   }
 
-  const rawAnchorsAll = [];
-  for (let ci = 0; ci < chunks.length; ci++) {
-    const ch = chunks[ci];
+  const rawAnchors = [];
+  for (const ch of chunks) {
     const chunkMid = stripOffsetX + (ch.x0 + ch.x1) / 2;
     for (const a of ch.anchors) {
       const anc = anchors.get(a.aid);
       if (!anc || anc.space !== "wall-edge") continue;
-      rawAnchorsAll.push({
+      rawAnchors.push({
         anchorCx: stripOffsetX + a.xPx,
         anchorCyRel: a.yPx,
         h: anc.v || 0,
@@ -1513,22 +1584,10 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
         mirror: ch.mirror,
         segIdx: ch.segIdx,
         chunkMid,
-        chunkIdx: ci,
-        runIdx: ch.runIdx,
         aid: a.aid,
       });
     }
   }
-
-  /* Optional thinning: drop anchors that merely sit on a straight visual
-     run inside their wall run, keeping only the extremes.  The strip's
-     cable line is drawn from each chunk's own anchor list (see
-     renderCableRunToCanvas), not from this array, so thinning here only
-     affects the pill labels and their leaders — the rendered cable path
-     is unaffected. */
-  const rawAnchors = filterCollinearVerticesInStrip
-    ? _filterCollinearWallAnchors(rawAnchorsAll, orderIdx)
-    : rawAnchorsAll;
 
   const clusters = [];
   const used = new Array(rawAnchors.length).fill(false);
@@ -1552,7 +1611,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
   const sideLineFor = (m) => {
     const wDist = m.mirror ? (m.len - m.nativeU) : m.nativeU;
     const eDist = m.mirror ? m.nativeU : (m.len - m.nativeU);
-    return "W " + fmtCm(wDist) + " · E " + fmtCm(eDist);
+    return "W " + fmtCm(wDist) + " . E " + fmtCm(eDist);
   };
 
   const items = [];
@@ -1904,16 +1963,9 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
 
   for (const it of placed) it.leaderStyle = styleMap.get(it) ?? 0;
 
-  /* Relax anchor descents apart. */
   refineLeaderOffsets(placed, topPad, trackOffsets, stripH);
-
-  /* Coordinate-descent optimiser: drives bevels and jogs together,
-     choosing every move by trial rather than by heuristic.  Handles
-     vertical-vertical, vertical-diagonal, diagonal-diagonal collisions
-     AND corner-feature exclusion zones in one unified loop.  Dead zones
-     are excluded from the candidate set, so no sub-perceptible spikes
-     or hooks ever get proposed. */
-  optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets);
+  optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets, boundaries,
+                          wireSegments, wallEdges);
 
   return {
     placed,
@@ -1926,68 +1978,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
   };
 }
 
-/* ---- Leader path builder ----
+/* ---- Vertex labels ---- */
 
-   Builds the polyline for one leader: anchor → descent → horizontal leg →
-   pill descent.  The pill descent runs at pillCenterX unless a pill box
-   sits in the way, in which case the path detours around it orthogonally.
-
-   By the placement algorithm, pillCenterX is guaranteed clear of every
-   lower-track pill (that's the corridor reservation), so the detour branch
-   is a safety net that in principle never fires.  It exists so that no
-   leader can visually cross a pill even if the invariant is ever broken. */
-function computeLeaderPath(anchorX, anchorY, offA, chanY, pillX, pillTopY,
-                           self, placed, stripBottom, topPad, trackOffsets) {
-  const M = 4;   // detour margin, in px
-  const path = [];
-  path.push([anchorX, anchorY]);
-  path.push([anchorX + offA, chanY]);
-  path.push([pillX, chanY]);
-
-  /* Collect pills whose box would be crossed by a vertical line at x=pillX
-     between y = chanY and y = pillTopY.  Exclude the leader's own pill. */
-  const blockers = [];
-  for (const Q of placed) {
-    if (Q === self) continue;
-    const qL = Q.pillCenterX - Q.w / 2;
-    const qR = Q.pillCenterX + Q.w / 2;
-    const qT = stripBottom + topPad + trackOffsets[Q.track];
-    const qB = qT + Q.h;
-    if (pillX > qL && pillX < qR && qB > chanY && qT < pillTopY) {
-      blockers.push({ qL, qR, qT, qB });
-    }
-  }
-  blockers.sort((a, b) => a.qT - b.qT);
-
-  let curY = chanY;
-  for (const b of blockers) {
-    if (b.qT <= curY) continue;
-    const distL = pillX - b.qL;
-    const distR = b.qR - pillX;
-    const detourX = (distR < distL) ? (b.qR + M) : (b.qL - M);
-    path.push([pillX,   b.qT - M]);
-    path.push([detourX, b.qT - M]);
-    path.push([detourX, b.qB + M]);
-    path.push([pillX,   b.qB + M]);
-    curY = b.qB + M;
-  }
-  path.push([pillX, pillTopY]);
-  return path;
-}
-
-/* ---- Vertex coordinate labels (wall strip, below) ----
-
-   Pills are drawn FIRST, leaders SECOND.  This means no leader can ever be
-   hidden behind a pill — if the placement invariant ever failed and a
-   leader's descent crossed a pill box, the detour in computeLeaderPath
-   routes around it, and the on-top draw order guarantees the leader stays
-   visible regardless.
-
-   Bevels and jogs: each leader's it.bevel0 / it.bevel1 chamfer the first
-   and last interior elbows of its path; it.jog0 / it.jog1 insert a 45°
-   trapezoid into the middle of the anchor / pill descent.  The path is
-   rebuilt from scratch on every draw, bevels applied, then jogs applied,
-   in that order. */
 function drawVertexLabels(c, placement, stripY, stripH) {
   if (!placement.placed.length) return;
   const { placed, PAD_X, PAD_Y, LINE_H, topPad, trackOffsets } = placement;
@@ -1996,7 +1988,6 @@ function drawVertexLabels(c, placement, stripY, stripH) {
   const pillTopYFor = (it) =>
     stripBottom + topPad + trackOffsets[it.track];
 
-  /* Pass 1 — pills. */
   for (const it of placed) {
     const pillTopY = pillTopYFor(it);
     const rx = it.pillCenterX - it.w / 2;
@@ -2004,11 +1995,11 @@ function drawVertexLabels(c, placement, stripY, stripH) {
 
     c.fillStyle = "#ffffff";
     c.fillRect(rx, ry, it.w, it.h);
-    c.strokeStyle = "#1e293b";
+    c.strokeStyle = "#000000";
     c.lineWidth = 1.2;
     c.strokeRect(rx + 0.5, ry + 0.5, it.w - 1, it.h - 1);
 
-    c.fillStyle = "#0f172a";
+    c.fillStyle = "#000000";
     c.textAlign = "center";
     c.textBaseline = "middle";
     let ty = ry + PAD_Y + LINE_H / 2;
@@ -2018,10 +2009,8 @@ function drawVertexLabels(c, placement, stripY, stripH) {
     }
   }
 
-  /* Pass 2 — leaders, on top, with detours around any pill they would
-     otherwise cross, and with bevels and jogs applied. */
   c.save();
-  c.strokeStyle = "#334155";
+  c.strokeStyle = "#000000";
   c.lineWidth = 1.4;
   c.lineJoin = "round";
   c.lineCap = "butt";
@@ -2036,7 +2025,7 @@ function drawVertexLabels(c, placement, stripY, stripH) {
 
     const basePath = computeLeaderPath(
       anchorX, anchorY, offA, chanY, pillX, pillTopY,
-      it, placed, stripBottom, topPad, trackOffsets);
+      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
 
     const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
     const path = _applyJogsToPath(bevelled, it);
@@ -2107,7 +2096,7 @@ function scaleCanvasToWidth(srcCanvas, targetW) {
 /* ---- Main renderer ---- */
 
 function renderCableRunToCanvas(tcId) {
-  const orderedIds = linearizeTrueCable(tcId);
+  const orderedIds = _collapseStripCollinear(linearizeTrueCable(tcId));
   if (orderedIds.length < 1) return null;
 
   const segDirectory = buildSegmentDirectory(orderedIds);
@@ -2150,8 +2139,6 @@ function renderCableRunToCanvas(tcId) {
   const stripAreaX1  = IMG_W - MARGIN;
   const stripAreaW   = stripAreaX1 - stripAreaX0;
 
-  /* Nonlinear strip layout.  Solve for a base scale s such that
-       Σ max(L_k · s, MIN_CHUNK_PX) = availW. */
   const chunkWidthsPx = [];
   let stripScale = 0, stripW = 0;
   if (stripActive) {
@@ -2249,22 +2236,29 @@ function renderCableRunToCanvas(tcId) {
   }
 
   const INFO_HEADER_H = 22;
-  const INFO_ROW_H    = 22;
+  const INFO_ROW_H    = 26;
   const INFO_GAP      = 16;
   const WALL_ROW_H    = 28;
   const nWalls        = segDirectory.size;
-  const HINT_LINES    = 8;
 
-  const infoH = INFO_HEADER_H + 3 * INFO_ROW_H
+  const BREAKDOWN_H   = INFO_HEADER_H + 3 * INFO_ROW_H;
+  const LEGEND_H      = INFO_HEADER_H + 5 * INFO_ROW_H;
+  const HINTS_H       = 14 * 14 + INFO_ROW_H;
+  const WALLS_H       = hasWalls
+    ? INFO_HEADER_H + nWalls * WALL_ROW_H
+    : 0;
+
+  const infoH = BREAKDOWN_H
               + INFO_GAP
-              + INFO_HEADER_H + 3 * INFO_ROW_H + HINT_LINES * 14 + INFO_ROW_H
+              + LEGEND_H + HINTS_H
               + INFO_GAP
-              + (hasWalls ? INFO_HEADER_H + nWalls * WALL_ROW_H : 0);
+              + WALLS_H;
+
   const badgeStackH = nWalls > 0 ? (nWalls - 1) * BADGE_STEP + 2 * badgeR : 0;
 
   const planRegionH = Math.max(
     planH + 2 * badgeR + 24,
-    infoH + 20,
+    infoH + 40,
     badgeStackH + 20
   );
 
@@ -2277,7 +2271,7 @@ function renderCableRunToCanvas(tcId) {
   if (stripActive) y += ROW_GAP_AFTER_STRIP;
   const planRegionY = y;
   if (planActive || hasWalls) y += planRegionH;
-  const imgH = y + MARGIN;
+  const imgH = y + 2 * MARGIN;
 
   const DPR = 3;
   const cv = document.createElement("canvas");
@@ -2293,16 +2287,16 @@ function renderCableRunToCanvas(tcId) {
   const nParts = allCables().filter(x => trueCableIdOf(x) === tcId).length;
 
   c.font = "700 22px -apple-system, system-ui, sans-serif";
-  c.fillStyle = "#0f172a";
+  c.fillStyle = "#000000";
   c.textAlign = "left"; c.textBaseline = "middle";
   c.fillText("Cable " + tcId, MARGIN, MARGIN + TITLE_H / 2);
 
   c.font = "600 13px ui-monospace, monospace";
-  c.fillStyle = "#475569";
+  c.fillStyle = "#333333";
   c.textAlign = "right";
   c.fillText(
-    `${orderedIds.length} anchor${orderedIds.length === 1 ? "" : "s"} · ` +
-    `${nParts} part${nParts === 1 ? "" : "s"} · total ${fmtM(totalLen)}`,
+    `${orderedIds.length} anchor${orderedIds.length === 1 ? "" : "s"} . ` +
+    `${nParts} part${nParts === 1 ? "" : "s"} . total ${fmtM(totalLen)}`,
     IMG_W - MARGIN, MARGIN + TITLE_H / 2
   );
   c.textAlign = "left"; c.textBaseline = "top";
@@ -2313,11 +2307,12 @@ function renderCableRunToCanvas(tcId) {
     const yCeil   = stripY;
     const voidX0  = stripOffsetX - 8;
     const voidX1  = stripOffsetX + stripW + 8;
-    c.fillStyle = "#eef2f7";
+
+    c.fillStyle = _pat(c, "void");
     c.fillRect(voidX0, yCeil, voidX1 - voidX0, yFloor - yCeil);
 
     c.save();
-    c.strokeStyle = "rgba(148, 163, 184, 0.55)";
+    c.strokeStyle = "rgba(0, 0, 0, 0.35)";
     c.lineWidth = 1;
     c.setLineDash([4, 4]);
     c.beginPath();
@@ -2335,16 +2330,14 @@ function renderCableRunToCanvas(tcId) {
       const rh   = Math.max(1, yBot - yTop);
 
       const isStep = (ch.kind === "step");
-      c.fillStyle = isStep ? "rgba(148, 163, 184, 0.28)" : "#ffffff";
+      c.fillStyle = isStep ? _pat(c, "step") : "#ffffff";
       c.fillRect(rx, yTop, rw, rh);
-      c.strokeStyle = isStep ? "#94a3b8" : "#cbd5e1";
-      c.lineWidth = 1;
+      c.strokeStyle = "#000000";
+      c.lineWidth = isStep ? 1.2 : 0.8;
       c.strokeRect(rx + 0.5, yTop + 0.5, rw - 1, rh - 1);
     }
 
-    c.strokeStyle = "#2563eb";
-    c.lineWidth = 4;
-    c.lineCap = "round"; c.lineJoin = "round";
+    const stripRuns = [];
     for (let ri = 0; ri < wallLayouts.length; ri++) {
       const lineAnchors = [];
       for (const ch of chunks) {
@@ -2354,28 +2347,48 @@ function renderCableRunToCanvas(tcId) {
       for (const a of lineAnchors) {
         anchorStripPos.set(a.aid, [stripOffsetX + a.xPx, stripY + a.yPx]);
       }
-      if (lineAnchors.length === 1) {
-        const a = lineAnchors[0];
-        c.beginPath();
-        c.arc(stripOffsetX + a.xPx, stripY + a.yPx, 5, 0, Math.PI * 2);
-        c.fillStyle = "#2563eb"; c.fill();
-      } else if (lineAnchors.length > 1) {
-        c.beginPath();
-        c.moveTo(stripOffsetX + lineAnchors[0].xPx, stripY + lineAnchors[0].yPx);
-        for (let i = 1; i < lineAnchors.length; i++) {
-          c.lineTo(stripOffsetX + lineAnchors[i].xPx,
-                   stripY      + lineAnchors[i].yPx);
-        }
-        c.stroke();
-      }
+      stripRuns.push(lineAnchors);
     }
+
+    const _strokeRun = (lineAnchors) => {
+      if (lineAnchors.length < 2) return;
+      c.beginPath();
+      c.moveTo(stripOffsetX + lineAnchors[0].xPx,
+               stripY      + lineAnchors[0].yPx);
+      for (let i = 1; i < lineAnchors.length; i++) {
+        c.lineTo(stripOffsetX + lineAnchors[i].xPx,
+                 stripY      + lineAnchors[i].yPx);
+      }
+      c.stroke();
+    };
+
+    c.save();
+    c.lineCap = "round"; c.lineJoin = "round";
+
+    c.strokeStyle = "#ffffff";
+    c.lineWidth = 7;
+    for (const run of stripRuns) _strokeRun(run);
+
+    c.strokeStyle = "#000000";
+    c.lineWidth = 3.2;
+    for (const run of stripRuns) _strokeRun(run);
+
+    c.fillStyle = "#000000";
+    for (const run of stripRuns) {
+      if (run.length !== 1) continue;
+      c.beginPath();
+      c.arc(stripOffsetX + run[0].xPx, stripY + run[0].yPx, 5, 0,
+            Math.PI * 2);
+      c.fill();
+    }
+    c.restore();
 
     for (const ch of chunks) {
       const entry = segDirectory.get(ch.segIdx);
       if (!entry) continue;
       const cx = stripOffsetX + (ch.x0 + ch.x1) / 2;
       const by = stripHeaderY + STRIP_HEADER_H / 2;
-      c.strokeStyle = "#334155";
+      c.strokeStyle = "#000000";
       c.lineWidth = 1;
       c.beginPath();
       c.moveTo(cx, by + badgeRadiusFor(entry.order) + 1);
@@ -2387,14 +2400,14 @@ function renderCableRunToCanvas(tcId) {
     drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
 
     c.font = "700 18px sans-serif";
-    c.fillStyle = "#64748b";
+    c.fillStyle = "#333333";
     c.textAlign = "center"; c.textBaseline = "middle";
     for (let ri = 0; ri < wallLayouts.length - 1; ri++) {
       let lastX1 = 0;
       for (const ch of chunks) if (ch.runIdx === ri) lastX1 = ch.x1;
       const xMid = stripOffsetX + lastX1 + RUN_GAP / 2;
       const yMid = stripY + STRIP_FIXED_H / 2;
-      c.fillText("⋯", xMid, yMid);
+      c.fillText("...", xMid, yMid);
     }
     c.textAlign = "left"; c.textBaseline = "top";
 
@@ -2406,8 +2419,8 @@ function renderCableRunToCanvas(tcId) {
       { v: WALL_HEIGHT,   label: String(Math.round(WALL_HEIGHT / 10)) },
     ];
     c.save();
-    c.strokeStyle = "#334155";
-    c.fillStyle = "#334155";
+    c.strokeStyle = "#000000";
+    c.fillStyle = "#000000";
     c.lineWidth = 1;
     c.font = "600 11px ui-monospace, monospace";
     c.textAlign = "right";
@@ -2420,7 +2433,7 @@ function renderCableRunToCanvas(tcId) {
       c.stroke();
       c.fillText(t.label, axisRight - 9, ty);
     }
-    c.strokeStyle = "#94a3b8";
+    c.strokeStyle = "#666666";
     c.beginPath();
     c.moveTo(axisRight + 0.5, stripY);
     c.lineTo(axisRight + 0.5, stripY + STRIP_FIXED_H);
@@ -2430,7 +2443,7 @@ function renderCableRunToCanvas(tcId) {
     c.rotate(-Math.PI / 2);
     c.textAlign = "center"; c.textBaseline = "middle";
     c.font = "600 10px ui-monospace, monospace";
-    c.fillStyle = "#475569";
+    c.fillStyle = "#333333";
     c.fillText("height (cm)", 0, 0);
     c.restore();
     c.restore();
@@ -2452,7 +2465,7 @@ function renderCableRunToCanvas(tcId) {
       badgeColX   = 0;
     }
 
-    const infoY       = planRegionY + (planRegionH - infoH) / 2;
+    const infoY       = planRegionY + 20;
     const planOriginY = planRegionY + (planRegionH - planH) / 2;
 
     if (planActive) {
@@ -2482,10 +2495,10 @@ function renderCableRunToCanvas(tcId) {
           }
           c.closePath();
         }
-        c.fillStyle = "rgba(148, 163, 184, 0.10)";
+        c.fillStyle = _pat(c, "roomInterior");
         c.fill("evenodd");
-        c.strokeStyle = "#64748b";
-        c.lineWidth = 1;
+        c.strokeStyle = "#000000";
+        c.lineWidth = 0.8;
         c.stroke();
       }
 
@@ -2494,7 +2507,7 @@ function renderCableRunToCanvas(tcId) {
         if (!seg) continue;
         const [ax, ay] = f2p(seg.a[0], seg.a[1]);
         const [bx, by] = f2p(seg.b[0], seg.b[1]);
-        c.strokeStyle = "#94a3b8";
+        c.strokeStyle = "#000000";
         c.lineWidth = 7;
         c.lineCap = "round";
         c.beginPath();
@@ -2503,9 +2516,7 @@ function renderCableRunToCanvas(tcId) {
         c.stroke();
       }
 
-      c.strokeStyle = "#2563eb";
-      c.lineWidth = 4;
-      c.lineCap = "round"; c.lineJoin = "round";
+      const planPts = [];
       for (const run of planRuns) {
         const pts = [];
         for (const id of run.ids) {
@@ -2518,23 +2529,42 @@ function renderCableRunToCanvas(tcId) {
           pts.push([cx, cy]);
           anchorPlanPos.set(id, [cx, cy]);
         }
-        if (pts.length === 1) {
-          c.beginPath();
-          c.arc(pts[0][0], pts[0][1], 5, 0, Math.PI * 2);
-          c.fillStyle = "#2563eb"; c.fill();
-        } else if (pts.length > 1) {
-          c.beginPath();
-          c.moveTo(pts[0][0], pts[0][1]);
-          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
-          c.stroke();
-        }
+        planPts.push(pts);
       }
+
+      const _strokePlan = (pts) => {
+        if (pts.length < 2) return;
+        c.beginPath();
+        c.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+        c.stroke();
+      };
+
+      c.save();
+      c.lineCap = "round"; c.lineJoin = "round";
+
+      c.strokeStyle = "#ffffff";
+      c.lineWidth = 7;
+      for (const pts of planPts) _strokePlan(pts);
+
+      c.strokeStyle = "#000000";
+      c.lineWidth = 3.2;
+      for (const pts of planPts) _strokePlan(pts);
+
+      c.fillStyle = "#000000";
+      for (const pts of planPts) {
+        if (pts.length !== 1) continue;
+        c.beginPath();
+        c.arc(pts[0][0], pts[0][1], 5, 0, Math.PI * 2);
+        c.fill();
+      }
+      c.restore();
 
       for (const [, [px, py]] of anchorPlanPos) {
         c.beginPath();
         c.arc(px, py, 4, 0, Math.PI * 2);
         c.fillStyle = "#ffffff"; c.fill();
-        c.strokeStyle = "#2563eb"; c.lineWidth = 2; c.stroke();
+        c.strokeStyle = "#000000"; c.lineWidth = 1.8; c.stroke();
       }
 
       if (hasWalls) {
@@ -2602,7 +2632,7 @@ function renderCableRunToCanvas(tcId) {
       const infoX0 = infoX;
 
       c.font = "700 13px -apple-system, system-ui, sans-serif";
-      c.fillStyle = "#1e293b";
+      c.fillStyle = "#000000";
       c.textAlign = "left"; c.textBaseline = "top";
       c.fillText("Length breakdown", infoX0, infoCurY);
       infoCurY += INFO_HEADER_H;
@@ -2626,7 +2656,7 @@ function renderCableRunToCanvas(tcId) {
       rows.push(["Total", fmtM(totalLen)]);
 
       c.font = "500 14px ui-monospace, monospace";
-      c.fillStyle = "#334155";
+      c.fillStyle = "#000000";
       for (const [label, val] of rows) {
         c.fillText(label, infoX0 + 4, infoCurY);
         c.fillText(val,   infoX0 + 4 + 110, infoCurY);
@@ -2635,36 +2665,72 @@ function renderCableRunToCanvas(tcId) {
       infoCurY += INFO_GAP;
 
       c.font = "700 13px -apple-system, system-ui, sans-serif";
-      c.fillStyle = "#1e293b";
+      c.fillStyle = "#000000";
       c.fillText("Legend", infoX0, infoCurY);
       infoCurY += INFO_HEADER_H;
 
-      c.font = "500 13px -apple-system, system-ui, sans-serif";
-      for (const [col, label] of [
-        ["#2563eb", "cable"],
-        ["rgba(16, 185, 129, 0.9)", "wall↔floor link"],
-        ["#94a3b8", "traversed wall"],
-      ]) {
-        c.fillStyle = col;
-        c.fillRect(infoX0 + 4, infoCurY + 6, 24, 4);
-        c.fillStyle = "#334155";
-        c.fillText(label, infoX0 + 4 + 32, infoCurY);
+      const _swatch = (label, h, draw) => {
+        const swX = infoX0 + 4;
+        const swY = infoCurY + 8;
+        const swW = 24;
+        c.save();
+        c.strokeStyle = "#000000";
+        c.fillStyle   = "#000000";
+        c.lineCap     = "round";
+        c.lineJoin    = "round";
+        draw(swX, swY, swW, h);
+        c.restore();
+        c.fillStyle = "#000000";
+        c.font = "500 13px -apple-system, system-ui, sans-serif";
+        c.textAlign = "left"; c.textBaseline = "top";
+        c.fillText(label, swX + 32, infoCurY);
         infoCurY += INFO_ROW_H;
-      }
+      };
+
+      _swatch("cable", 7, (x, y, w) => {
+        c.lineWidth = 3.2;
+        c.beginPath(); c.moveTo(x, y); c.lineTo(x + w, y); c.stroke();
+      });
+      _swatch("wall<->floor link", 7, (x, y, w) => {
+        c.lineWidth = 1.4;
+        c.setLineDash([2, 3]);
+        c.beginPath(); c.moveTo(x, y); c.lineTo(x + w, y); c.stroke();
+        c.setLineDash([]);
+      });
+      _swatch("traversed wall", 7, (x, y, w) => {
+        c.lineWidth = 6;
+        c.beginPath(); c.moveTo(x + 3, y); c.lineTo(x + w - 3, y); c.stroke();
+      });
+      _swatch("step face (forward hatch)", 9, (x, y, w, h) => {
+        c.fillStyle = _pat(c, "step");
+        c.fillRect(x, y - h / 2, w, h);
+        c.strokeStyle = "#000000";
+        c.lineWidth = 0.8;
+        c.strokeRect(x + 0.5, y - h / 2 + 0.5, w - 1, h - 1);
+      });
+      _swatch("void (backslash hatch)", 9, (x, y, w, h) => {
+        c.fillStyle = _pat(c, "void");
+        c.fillRect(x, y - h / 2, w, h);
+        c.strokeStyle = "rgba(0, 0, 0, 0.35)";
+        c.lineWidth = 0.6;
+        c.setLineDash([2, 2]);
+        c.strokeRect(x + 0.5, y - h / 2 + 0.5, w - 1, h - 1);
+        c.setLineDash([]);
+      });
 
       c.font = "500 11px -apple-system, system-ui, sans-serif";
-      c.fillStyle = "#64748b";
+      c.fillStyle = "#333333";
       c.fillText("V<n> names each vertex in cable order.", infoX0 + 4, infoCurY);
       infoCurY += 14;
       c.fillText("Line 1 of a pill: name + height (cm).", infoX0 + 4, infoCurY);
       infoCurY += 14;
       c.fillText("Line 2: distance from the vertex to", infoX0 + 4, infoCurY);
       infoCurY += 14;
-      c.fillText("each side of the wall as drawn —", infoX0 + 4, infoCurY);
+      c.fillText("each side of the wall as drawn -", infoX0 + 4, infoCurY);
       infoCurY += 14;
       c.fillText("west = visual-left edge of the strip", infoX0 + 4, infoCurY);
       infoCurY += 14;
-      c.fillText("chunk, east = visual-right edge — in", infoX0 + 4, infoCurY);
+      c.fillText("chunk, east = visual-right edge - in", infoX0 + 4, infoCurY);
       infoCurY += 14;
       c.fillText("cm, measured along the wall.  At", infoX0 + 4, infoCurY);
       infoCurY += 14;
@@ -2676,15 +2742,31 @@ function renderCableRunToCanvas(tcId) {
       infoCurY += 14;
       c.fillText("width to stay legible.", infoX0 + 4, infoCurY);
       infoCurY += 14;
-      c.fillText("Gray band = void; slate = step face.", infoX0 + 4, infoCurY);
+      c.fillText("Forward hatch = step face;", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("backslash hatch = void.", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("Leaders steer clear of wall-section", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("boundaries, the cable wire, and the", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("chunk top/bottom edges; parallel", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("overlaps are avoided by re-shaping", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("the leader's first leg.  'Filter", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("collinear vertices' collapses redundant", infoX0 + 4, infoCurY);
+      infoCurY += 14;
+      c.fillText("anchors.", infoX0 + 4, infoCurY);
       infoCurY += INFO_ROW_H;
       infoCurY += INFO_GAP;
 
       if (hasWalls) {
         c.font = "700 13px -apple-system, system-ui, sans-serif";
-        c.fillStyle = "#1e293b";
+        c.fillStyle = "#000000";
         c.textAlign = "left"; c.textBaseline = "top";
-        c.fillText("Wall segments · arrow style", infoX0, infoCurY);
+        c.fillText("Wall segments . arrow style", infoX0, infoCurY);
         infoCurY += INFO_HEADER_H;
 
         const arrowLen = 36;
@@ -2695,7 +2777,7 @@ function renderCableRunToCanvas(tcId) {
           drawArrowSample(c, ax0, infoCurY + WALL_ROW_H / 2, arrowLen,
                           styleFor(entry.order));
           c.font = "600 14px ui-monospace, monospace";
-          c.fillStyle = "#0f172a";
+          c.fillStyle = "#000000";
           c.textAlign = "left"; c.textBaseline = "middle";
           c.fillText(entry.tag, ax0 + arrowLen + 8, infoCurY + WALL_ROW_H / 2);
           infoCurY += WALL_ROW_H;
@@ -2705,9 +2787,9 @@ function renderCableRunToCanvas(tcId) {
     }
   }
 
-  c.setLineDash([5, 5]);
-  c.strokeStyle = "rgba(16, 185, 129, 0.9)";
-  c.lineWidth = 1.6;
+  c.setLineDash([2, 3]);
+  c.strokeStyle = "#000000";
+  c.lineWidth = 1.4;
 
   const drawDottedWire = (wp, fp) => {
     c.beginPath();
@@ -2715,11 +2797,10 @@ function renderCableRunToCanvas(tcId) {
     c.lineTo(fp[0], fp[1]);
     c.stroke();
     c.setLineDash([]);
-    c.beginPath(); c.arc(wp[0], wp[1], 5, 0, Math.PI * 2);
-    c.fillStyle = "rgba(16, 185, 129, 0.95)"; c.fill();
-    c.beginPath(); c.arc(fp[0], fp[1], 5, 0, Math.PI * 2);
-    c.fillStyle = "rgba(16, 185, 129, 0.95)"; c.fill();
-    c.setLineDash([5, 5]);
+    c.fillStyle = "#000000";
+    c.beginPath(); c.arc(wp[0], wp[1], 4, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(fp[0], fp[1], 4, 0, Math.PI * 2); c.fill();
+    c.setLineDash([2, 3]);
   };
 
   for (const id of orderedIds) {
@@ -2761,7 +2842,7 @@ function renderCableRunToCanvas(tcId) {
 function openExportPreview(images) {
   const w = window.open("", "_blank");
   if (!w) {
-    flashStatus("Popup blocked — allow popups for this page", "bad");
+    flashStatus("Popup blocked - allow popups for this page", "bad");
     return;
   }
   let html = `<!DOCTYPE html>
@@ -2769,51 +2850,63 @@ function openExportPreview(images) {
 <title>Cable run diagrams</title>
 <style>
   body { font-family: -apple-system, system-ui, sans-serif;
-         margin: 0; padding: 24px; background: #f1f5f9; color: #1e293b; }
+         margin: 0; padding: 24px; background: #f1f5f9; color: #000000; }
   h1 { font-size: 22px; margin: 0 0 4px; }
-  p.sub { margin: 0 0 16px; color: #64748b; font-size: 13px; }
+  p.sub { margin: 0 0 16px; color: #333333; font-size: 13px; }
   .toolbar { margin: 0 0 24px; display: flex; gap: 10px;
              align-items: center; flex-wrap: wrap; }
   .toolbar button {
     padding: 8px 16px; cursor: pointer; border: 0;
-    background: #1d4ed8; color: #fff; border-radius: 5px;
+    background: #000000; color: #ffffff; border-radius: 5px;
     font-size: 13px; font-weight: 600;
   }
-  .toolbar button:hover { background: #1e40af; }
-  .toolbar button.secondary { background: #4f46e5; }
-  .toolbar button.secondary:hover { background: #4338ca; }
-  .toolbar button:disabled { background: #94a3b8; cursor: default; }
-  .toolbar .hint { color: #64748b; font-size: 12px; }
-  .printHint { background: #eef2ff; border-left: 3px solid #4f46e5;
+  .toolbar button:hover { background: #333333; }
+  .toolbar button.secondary { background: #555555; }
+  .toolbar button.secondary:hover { background: #333333; }
+  .toolbar button:disabled { background: #999999; cursor: default; }
+  .toolbar label.toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 600; color: #000000;
+    cursor: pointer; user-select: none;
+    padding: 6px 10px; border: 1px solid #000000;
+    border-radius: 5px; background: #ffffff;
+  }
+  .toolbar label.toggle:hover { background: #f0f0f0; }
+  .toolbar .hint { color: #333333; font-size: 12px; }
+  .printHint { background: #f0f0f0; border-left: 3px solid #000000;
                padding: 10px 14px; margin: 0 0 24px;
-               font-size: 13px; color: #312e81; border-radius: 0 4px 4px 0; }
-  .card { background: #fff; border-radius: 8px; padding: 18px;
+               font-size: 13px; color: #000000; border-radius: 0 4px 4px 0; }
+  .card { background: #ffffff; border-radius: 8px; padding: 18px;
           margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
   .card h2 { font-size: 15px; margin: 0 0 4px;
-             font-family: ui-monospace, monospace; color: #334155; }
-  .card .meta { font-size: 12px; color: #64748b; margin: 0 0 12px;
+             font-family: ui-monospace, monospace; color: #000000; }
+  .card .meta { font-size: 12px; color: #333333; margin: 0 0 12px;
                 font-family: ui-monospace, monospace; }
   .card img { max-width: 100%; height: auto; display: block;
-              border: 1px solid #e2e8f0; border-radius: 4px; }
+              border: 1px solid #cccccc; border-radius: 4px; }
   .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
   .actions a { display: inline-block; padding: 6px 14px;
-               background: #1d4ed8; color: #fff; text-decoration: none;
+               background: #000000; color: #ffffff; text-decoration: none;
                border-radius: 4px; font-size: 12px; font-weight: 600;
                cursor: pointer; }
-  .actions a:hover { background: #1e40af; }
-  .actions a.json { background: #4f46e5; }
-  .actions a.json:hover { background: #4338ca; }
+  .actions a:hover { background: #333333; }
+  .actions a.json { background: #555555; }
+  .actions a.json:hover { background: #333333; }
 </style></head><body>
 <h1>Cable run diagrams</h1>
-<p class="sub">${images.length} cable${images.length === 1 ? "" : "s"}</p>
+<p class="sub">${images.length} cable${images.length === 1 ? "" : "s"} - black-and-white print layout</p>
 <div class="printHint">
   Each diagram is rendered at ~2200 px wide.
   For best legibility when printing, place it in your document at
-  <b>180 – 210 mm</b> wide (roughly A5 landscape height).
+  <b>180 - 210 mm</b> wide (roughly A5 landscape height).
 </div>
 <div class="toolbar">
-  <button id="downloadAllBtn">⬇️ Download all PNGs (${images.length})</button>
-  <button id="downloadAllJsonBtn" class="secondary">⬇️ Download all JSON (${images.length})</button>
+  <button id="downloadAllBtn">Download all PNGs (${images.length})</button>
+  <button id="downloadAllJsonBtn" class="secondary">Download all JSON (${images.length})</button>
+  <label class="toggle" title="Collapse wall-edge anchors that lie on a straight run of the same wall">
+    <input type="checkbox" id="filterCollinear">
+    Filter collinear vertices in strip
+  </label>
   <span class="hint" id="dlHint"></span>
 </div>`;
 
@@ -2830,9 +2923,9 @@ function openExportPreview(images) {
                    + encodeURIComponent(jsonText);
 
     html += `
-<div class="card">
+<div class="card" data-cable-id="${img.id}">
   <h2>Cable ${img.id}</h2>
-  <p class="meta">${wpx} × ${hpx} px  ·  ${mm} mm wide at 300 DPI</p>
+  <p class="meta">${wpx} x ${hpx} px  .  ${mm} mm wide at 300 DPI</p>
   <img src="${url}" alt="Cable ${img.id} run diagram">
   <div class="actions">
     <a href="${url}"     download="cable_${img.id}.png">Download PNG</a>
@@ -2850,6 +2943,7 @@ function openExportPreview(images) {
   const allBtn     = doc.getElementById("downloadAllBtn");
   const allJsonBtn = doc.getElementById("downloadAllJsonBtn");
   const hint       = doc.getElementById("dlHint");
+  const filterCb   = doc.getElementById("filterCollinear");
 
   if (allBtn) {
     allBtn.addEventListener("click", () => {
@@ -2897,6 +2991,55 @@ function openExportPreview(images) {
       hint.textContent = "Downloaded cable_runs.json";
     });
   }
+
+  if (filterCb) {
+    filterCb.checked = !!window.filterCollinearVerticesInStrip;
+    filterCb.addEventListener("change", () => {
+      window.filterCollinearVerticesInStrip = filterCb.checked;
+
+      for (const tc of state.trueCables) {
+        let result = null;
+        try {
+          result = renderCableRunToCanvas(tc.id);
+        } catch (err) {
+          console.error("re-render failed for cable " + tc.id, err);
+          continue;
+        }
+        if (!result || !result.canvas) continue;
+
+        const card = doc.querySelector(
+          `[data-cable-id="${tc.id}"]`);
+        if (!card) continue;
+
+        const url = result.canvas.toDataURL("image/png");
+        const imgEl = card.querySelector("img");
+        if (imgEl) imgEl.src = url;
+
+        const metaEl = card.querySelector(".meta");
+        if (metaEl) {
+          const wpx = result.canvas.width;
+          const hpx = result.canvas.height;
+          const mm  = Math.round(wpx * 25.4 / 300);
+          metaEl.textContent = `${wpx} x ${hpx} px  .  ${mm} mm wide at 300 DPI`;
+        }
+
+        const links = card.querySelectorAll("a");
+        if (links[0]) links[0].href = url;
+        if (links[1]) {
+          const jsonUrl = "data:application/json;charset=utf-8,"
+                        + encodeURIComponent(
+                            JSON.stringify(result.meta, null, 2));
+          links[1].href = jsonUrl;
+        }
+
+        const stored = images.find(im => im.id === tc.id);
+        if (stored) {
+          stored.canvas = result.canvas;
+          stored.meta   = result.meta;
+        }
+      }
+    });
+  }
 }
 
 /* ---- Button + entry point ---- */
@@ -2908,8 +3051,8 @@ function openExportPreview(images) {
   row.className = "row";
   const btn = document.createElement("button");
   btn.id = "exportBtn";
-  btn.textContent = "🖼️ Export cable runs";
-  btn.title = "Render one diagram per physical cable";
+  btn.textContent = "Export cable runs (print)";
+  btn.title = "Render one black-and-white diagram per physical cable";
   row.appendChild(btn);
   hr.parentNode.insertBefore(row, hr);
   btn.addEventListener("click", exportAllCableRuns);
@@ -2936,12 +3079,12 @@ function exportAllCableRuns() {
     }
   }
   if (!images.length) {
-    flashStatus("Nothing to export — " + failures.length + " cable(s) failed", "bad");
+    flashStatus("Nothing to export - " + failures.length + " cable(s) failed", "bad");
     return;
   }
   openExportPreview(images);
-  const suffix = failures.length ? " · " + failures.length + " failed" : "";
-  flashStatus(`✓ Exported ${images.length} cable run${images.length === 1 ? "" : "s"}${suffix}`,
+  const suffix = failures.length ? " - " + failures.length + " failed" : "";
+  flashStatus(`Exported ${images.length} cable run${images.length === 1 ? "" : "s"}${suffix}`,
               failures.length ? "warn" : "ok");
 }
 """
