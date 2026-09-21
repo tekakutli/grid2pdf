@@ -11,7 +11,16 @@ restored before any exception unwinds past the context manager.
 Install:  pip install build123d cairosvg
 Run:      python room.py
 Outputs:  room.step, room.stl, floor_plan.svg, floor_plan.png,
-          room_walls.json   (sidecar for downstream tools, schema v3)
+          room_walls.json   (sidecar for downstream tools)
+
+room_walls.json now also carries `planFaces` — the exact 2D section of
+the room solid at PLAN_CUT_Z, as a list of {outer, holes} polygons.
+This is what downstream tools (boxes_playground.py, cable_playground.py)
+should read when they want the room's footprint in plan view: it has
+the corner joins, the opening punches, the column merges, and the
+small-room walls all baked in, because it comes from build123d's own
+section operator rather than from any reconstruction on top of the
+surfaces array.
 """
 
 import json
@@ -53,6 +62,12 @@ with _quiet():
 #
 # Bare offsets in expressions are in units (99 = 99 units = 990 mm).
 # Anchors resolve to absolute mm values.
+#
+# IMPORTANT:  the numbers in GROUND_PERIMETER / SMALL_ROOMS / COLUMNS etc.
+# describe *distances along a walk*, not walls.  The physical surfaces of
+# the room are *calculated* from those distances: an opening punches a
+# hole, a step shifts the wall's z-band, and a column against a wall
+# splits the wall into distinct visible segments.  See _dump_wall_json().
 # ============================================================================
 
 
@@ -450,40 +465,82 @@ PLAN_CUT_Z  = CONSTANTS["PLAN_CUT_Z"]
 # DUMP WALL DEFINITIONS FOR DOWNSTREAM TOOLS (e.g. cable_playground.py)
 # ============================================================================
 #
-# Schema v3 — a 2D segment can carry SEVERAL vertical surfaces.
+# Schema v4 — "walls are calculated, not declared".
 #
-# Why: a wall above a step, a wall above a door, a wall between two windows
-# all sit on the same 2D footprint.  A scalar "height_mm" cannot describe
-# them all.  Each surface therefore carries a z-band instead:
+# v3 introduced z-bands so a single 2D footprint could carry several
+# vertical surfaces (wall-above-step, wall-above-door, ...).
 #
-#     z_range_mm = [z_lo, z_hi]
+# v4 takes the next step: the MEASUREMENTS block is understood as a walk,
+# and the emitted surfaces are DERIVED from that walk plus the features
+# placed on it.  In particular, a column sitting flush against a wall
+# physically occupies a slice of that wall — from inside the room you see
+# the column's face, not the wall behind it — so the wall is *split* at
+# the column's footprint and the covered slice is dropped.  A wall with
+# one column on it becomes two separate walls; a wall fully hidden by a
+# column (e.g. the short unnamed return between W8 and W3, which is
+# entirely inside C1) produces no wall surface at all.  The column
+# contributes its own room-facing sides as ``kind="column"`` surfaces.
 #
-# Downstream tools ask "what surface is at (x, y, z)?" and get exactly one
-# answer — or none, if (x, y, z) is inside solid material.
+# Each surface therefore carries:
+#     {tag, p1, p2, z_range_mm, kind, parent}
 #
-# The rooms's perimeter, in the order the surfaces are emitted, is traced
-# CCW when viewed from above; the left normal (-dy, dx)/L of each segment
-# points into the room.
+# and the pieces of a wall that were originally one MEASUREMENTS entry
+# share that entry's tag — the JSON just has more of them.
 #
-# Layout:
-#   * surfaces  — flat list of every visible surface, one entry per
-#                 (2D footprint × z-band) pair:
-#                     {tag, p1, p2, z_range_mm, kind, parent}
-#   * openings  — every door/window: {tag, wall_tag, p1, p2, sill_mm, top_mm}
-#   * columns   — plan-position boxes: {tag, note, box}
+# In addition to the surfaces, v4 dumps:
+#   * openings       — every door/window
+#   * columns        — plan-position boxes
+#   * steps          — step footprint outlines and heights
+#   * planFaces      — the exact 2D section of the room solid at
+#                      PLAN_CUT_Z, as a list of {outer, holes} polygons.
+#                      This is the authoritative plan-view footprint and
+#                      is what downstream tools should read when they
+#                      want "the shape of the walls in plan".  The
+#                      surfaces array is still useful for tools that
+#                      need per-piece metadata (z-bands, tags, parents),
+#                      but the corner joins and the column merges are
+#                      already correct in planFaces — do not try to
+#                      reconstruct them from surfaces.
 #
-# Polarity contract (added when the unfolded view learned to respect the
-# eagle-view alignment): each emitted (p1, p2) is oriented so that, when
-# the unfolded wall strip is laid out with u increasing left→right, the
+# Polarity contract: each emitted (p1, p2) is oriented so that when the
+# unfolded wall strip is laid out with u increasing left→right, the
 # segment's visual direction matches the plan:
-#
-#     • E–W walls run west → east   (east at the higher u / right side)
-#     • N–S walls run south → north (north at the higher u / right side)
-#
-# This is enforced by _normalize_polarity() right before each surfaces.append.
+#     • E–W walls run west → east
+#     • N–S walls run south → north
+# Enforced by _normalize_polarity() right before each surfaces.append.
 # ============================================================================
 
-def _dump_wall_json(path="room_walls.json"):
+
+def _wire_to_polygon(wire, tol=0.01):
+    """Trace a build123d Wire into an ordered [[x, y], ...] polygon.
+
+    Returns an empty list if the wire has fewer than three vertices.
+    The trace walks the edges, always following the free end, and
+    drops a duplicated closing point.  This is the same routine the
+    cable project's room_geometry.py uses; it is reimplemented here so
+    room.py does not depend on that module."""
+    edges = list(wire.edges())
+    if not edges:
+        return []
+    e0 = edges.pop(0)
+    pts = [e0.position_at(0), e0.position_at(1)]
+    end = pts[-1]
+    while edges:
+        for i, e in enumerate(edges):
+            s = e.position_at(0)
+            t = e.position_at(1)
+            if (s - end).length < tol:
+                pts.append(t); end = t; edges.pop(i); break
+            if (t - end).length < tol:
+                pts.append(s); end = s; edges.pop(i); break
+        else:
+            break
+    if len(pts) > 1 and (pts[0] - pts[-1]).length < tol:
+        pts.pop()
+    return [[float(p.X), float(p.Y)] for p in pts]
+
+
+def _dump_wall_json(room_solid, path="room_walls.json"):
 
     # ---------- inline helpers ------------------------------------------
     def _pip(px, py, poly):
@@ -526,14 +583,8 @@ def _dump_wall_json(path="room_walls.json"):
         """Orient a wall/step segment so its direction in the unfolded
         strip matches its visual alignment in the eagle view:
 
-            • E–W walls run west → east   (east at u1, i.e. on the right)
-            • N–S walls run south → north (north at u1, i.e. on the right)
-
-        The schema is unchanged — only the *order* of p1/p2 is affected,
-        so consumers that treat segments as undirected (key-normalised
-        dicts, adjacency tests) are unaffected, while the unfolding logic
-        in cable_playground.py picks up the intended alignment for free.
-        Diagonal segments (rare, none in practice) fall back to E–W.
+            • E–W walls run west → east
+            • N–S walls run south → north
         """
         dx = abs(p2[0] - p1[0])
         dy = abs(p2[1] - p1[1])
@@ -597,6 +648,61 @@ def _dump_wall_json(path="room_walls.json"):
                            else ((scoord, hi), (scoord, lo)))
         return out
 
+    def _column_overlap_on_wall(wp1, wp2, col_box, tol=0.5, probe=5.0):
+        """If the column box sits flush against the wall and lies on the
+        room side of it, return (t_lo, t_hi) — the range along the wall
+        (in mm, from wp1) that the column physically covers.  Otherwise
+        None.
+
+        Detection:  one of the column's four axis-aligned edges must be
+        collinear with the wall, and a probe point pushed `probe` mm from
+        the wall's midpoint towards the room's interior must land inside
+        the column's footprint.
+        """
+        x0, y0, x1, y1 = col_box
+        wdx = wp2[0] - wp1[0]; wdy = wp2[1] - wp1[1]
+        wL = hypot(wdx, wdy)
+        if wL < 1e-6:
+            return None
+        wux, wuy = wdx / wL, wdy / wL
+        wnx, wny = -wuy, wux           # wall normal (left of direction)
+        # For a CCW-oriented edge, the room is on the left: the room-side
+        # normal is the same as the left normal.
+        rnx, rny = wnx, wny
+
+        edges = [((x0, y0), (x1, y0)),   # south
+                 ((x1, y0), (x1, y1)),   # east
+                 ((x1, y1), (x0, y1)),   # north
+                 ((x0, y1), (x0, y0))]   # west
+        for cp1, cp2 in edges:
+            cdx = cp2[0] - cp1[0]; cdy = cp2[1] - cp1[1]
+            cL = hypot(cdx, cdy)
+            if cL < 1e-6:
+                continue
+            cux, cuy = cdx / cL, cdy / cL
+            # Parallel?
+            if abs(cux * wuy - cuy * wux) > 0.02:
+                continue
+            # Collinear with the wall's line?
+            perp = (cp1[0] - wp1[0]) * wnx + (cp1[1] - wp1[1]) * wny
+            if abs(perp) > tol:
+                continue
+            # Projection onto the wall's direction
+            t1 = (cp1[0] - wp1[0]) * wux + (cp1[1] - wp1[1]) * wuy
+            t2 = (cp2[0] - wp1[0]) * wux + (cp2[1] - wp1[1]) * wuy
+            tlo = max(0.0, min(t1, t2))
+            thi = min(wL, max(t1, t2))
+            if thi - tlo < tol:
+                continue
+            # Is the column on the room side of the wall?
+            tmid = (tlo + thi) * 0.5
+            px = wp1[0] + wux * tmid + rnx * probe
+            py = wp1[1] + wuy * tmid + rny * probe
+            if not (x0 <= px <= x1 and y0 <= py <= y1):
+                continue
+            return (tlo, thi)
+        return None
+
     WALL_H_MM = CONSTANTS["WALL_HEIGHT"] * UNIT_MM
 
     # ---------- main perimeter walls (CCW: room on left) ----------------
@@ -643,12 +749,6 @@ def _dump_wall_json(path="room_walls.json"):
                 p1, p2 = p2, p1
             if any(_overlaps((p1, p2), ms) for ms in main_segs_all):
                 continue
-            # Untagged walk entries are still real walls.  SR's walk uses
-            # None for unnamed boundary segments (e.g. the 13.5-unit stretch
-            # between W7's extension and W13 that shares its footprint with
-            # the top of SR_STRIP).  Synthesize a tag so it enters
-            # all_wall_edges; the step-riser pass will then match against it
-            # and suppress the phantom "step" surface at the same location.
             if not tag:
                 tag = f"{sr['tag']}.edge[{i + 1}]"
             sr_edges.append((tag, p1, p2))
@@ -745,9 +845,6 @@ def _dump_wall_json(path="room_walls.json"):
                     (owner["tag"], owner["_height"] * UNIT_MM, p1, p2))
 
     # ---------- wall ↔ step overlays ------------------------------------
-    # For each wall edge, find every step edge that is collinear with it AND
-    # whose step interior lies on the wall's room side.  Returns, per wall
-    # edge index, a list of (t_lo, t_hi, step_h) in wall-local coordinates.
     def _step_on_wall(wp1, wp2, sp1, sp2, step):
         wdx = wp2[0] - wp1[0]; wdy = wp2[1] - wp1[1]
         wL = hypot(wdx, wdy)
@@ -816,6 +913,24 @@ def _dump_wall_json(path="room_walls.json"):
         sill = float(op.get("_sill_mm", 0.0))
         top = float(sill + op.get("_h_mm", 0.0))
         wall_opening_feats[wall_idx].append((tlo, thi, sill, top))
+
+    # ---------- wall ↔ column overlays ----------------------------------
+    # A column sitting flush against a wall occupies a slice of that wall.
+    # From inside the room you see the column's face, not the wall behind
+    # it — so we treat the column's footprint as a full-height opening:
+    # the wall is split into pieces and the covered slice is dropped.  The
+    # column's own room-facing sides are emitted below as kind="column".
+    n_col_overlaps = 0
+    for idx, (_tag, wp1, wp2, _k, _p) in enumerate(all_wall_edges):
+        # Only split actual walls / small-room walls — not column faces.
+        if _k != "wall":
+            continue
+        for col in COLUMNS:
+            r = _column_overlap_on_wall(wp1, wp2, col["_box"])
+            if r is None:
+                continue
+            wall_opening_feats[idx].append((r[0], r[1], 0.0, WALL_H_MM))
+            n_col_overlaps += 1
 
     # ---------- z-profile along a wall ----------------------------------
     def _wall_z_pieces(wp1, wp2, step_feats, opening_feats):
@@ -919,8 +1034,57 @@ def _dump_wall_json(path="room_walls.json"):
                  float(col["_box"][2]), float(col["_box"][3])],
     } for col in COLUMNS]
 
+    # ---------- step footprints (v4 addition) ---------------------------
+    # The `surfaces` array only carries the step RISERS — the parts of a
+    # step's boundary that are not covered by a wall.  A consumer that
+    # wants the step's FOOTPRINT (the plan-view region, e.g. the boxes
+    # playground's light-blue hatch) has no way to reconstruct it from
+    # risers alone, because the wall-covered parts of the boundary are
+    # missing.  `steps` closes that gap by carrying the source outline
+    # verbatim.
+    steps_data = [{
+        "tag":       s["tag"],
+        "outline":   [[float(p[0]), float(p[1])] for p in s["_outline"]],
+        "height_mm": float(s["_height"] * UNIT_MM),
+    } for s in STEPS]
+
+    # ---------- plan section at cut height (v4 addition) ----------------
+    # The `surfaces` array carries the wall pieces as inner-face line
+    # segments.  A consumer that wants the room's FOOTPRINT in plan
+    # view — walls, columns, small-room walls, all as filled polygons
+    # at cut height — could reconstruct that from the segments plus
+    # the columns plus the small-room walls, but that reconstruction
+    # is fiddly and error-prone: corners need proper joins, openings
+    # leave gaps, columns that sit flush against a wall need to be
+    # merged with it, and the small-room walls need to be added
+    # separately.
+    #
+    # `planFaces` closes that gap by carrying the actual section of
+    # the room solid at PLAN_CUT_Z, extracted here while the solid is
+    # still in hand.  Consumer code that wants plan geometry just
+    # reads it: the corner joins, the opening punches, the column
+    # merges, and the small-room walls are all already correct.
+    plan_cut_z_mm = CONSTANTS["PLAN_CUT_Z"] * UNIT_MM
+    plan_faces = []
+    try:
+        with _quiet():
+            plan_sketch = section(room_solid, Plane.XY.offset(plan_cut_z_mm))
+        for face in plan_sketch.faces():
+            outer = _wire_to_polygon(face.outer_wire())
+            if len(outer) < 3:
+                continue
+            holes = []
+            for w in face.inner_wires():
+                h = _wire_to_polygon(w)
+                if len(h) >= 3:
+                    holes.append(h)
+            plan_faces.append({"outer": outer, "holes": holes})
+    except Exception as e:
+        print(f"  (could not compute plan section: {e})")
+        plan_faces = []
+
     data = {
-        "version":           3,
+        "version":           4,
         "unit_mm":           UNIT_MM,
         "wall_height_mm":    WALL_H_MM,
         "wall_thickness_mm": CONSTANTS["WALL_THICK"] * UNIT_MM,
@@ -928,6 +1092,8 @@ def _dump_wall_json(path="room_walls.json"):
         "surfaces":          surfaces,
         "openings":          openings_data,
         "columns":           columns_data,
+        "steps":             steps_data,
+        "planFaces":         plan_faces,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -935,13 +1101,12 @@ def _dump_wall_json(path="room_walls.json"):
     n_w  = sum(1 for s in surfaces if s["kind"] == "wall")
     n_c  = sum(1 for s in surfaces if s["kind"] == "column")
     n_st = sum(1 for s in surfaces if s["kind"] == "step")
-    print(f"Wrote {path}  (v3: {len(surfaces)} surface(s) — "
+    print(f"Wrote {path}  (v4: {len(surfaces)} surface(s) — "
           f"{n_w} wall, {n_c} column, {n_st} step; "
           f"{len(openings_data)} opening(s), "
-          f"{len(columns_data)} column(s))")
-
-
-_dump_wall_json()
+          f"{len(columns_data)} column(s); "
+          f"{n_col_overlaps} wall/column split(s); "
+          f"{len(plan_faces)} plan face(s))")
 
 
 # ============================================================================
@@ -1569,6 +1734,11 @@ for d in OPENINGS:
     room -= make_wall_opening(d["_wall_p1"], d["_wall_p2"], INNER_PTS,
                               d["_off_mm"], d["_w_mm"],
                               d["_sill_mm"], d["_h_mm"], WALL_T_MM)
+
+# Now that the room solid exists, emit the sidecar.  The sidecar's
+# planFaces field needs the solid's section at cut height, so this call
+# has to happen after the build above.
+_dump_wall_json(room)
 
 # ============================================================================
 # EXPORT 3D

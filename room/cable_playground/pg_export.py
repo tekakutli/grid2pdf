@@ -179,18 +179,18 @@ consumed a parity slot.
 
 Localisation
 ------------
-All human-readable text that lands in the rendered PNG or in the preview
-page is routed through T(key) against TRANSLATIONS[LANG].  LANG is a
-single constant near the top of EXPORT_JS — set it to "en", "es", or any
-other key you add to TRANSLATIONS.  Missing keys fall back to English, so
-a new language can be added incrementally without breaking the export.
+Every human-readable string this module writes to the rendered PNG, to
+the preview page, or into a status flash comes from T() in pg_i18n.py.
+The translation table lives there alongside every other string the
+playground shows; this module carries no translation machinery of its
+own.
 
 Deliberately NOT translated:
 
-    • wall-segment names — W1, W3, C1.W, SR.edge[1] — these are IDs, not
-      prose.  Renaming them would break save-file compatibility.
-    • pill contents — "V<n>", "h <cm>", "W <cm> . E <cm>" — the pill is a
-      symbolic block and its letters are code.
+    • wall-segment names — W1, W3, C1.W, SR.edge[1] — these are IDs,
+      not prose.  Renaming them would break save-file compatibility.
+    • pill contents — "V<n>", "h <cm>", "W <cm> . E <cm>" — the pill
+      is a symbolic block and its letters are code.
     • the "..." run-gap separator.
 """
 
@@ -200,146 +200,17 @@ EXPORT_JS = r"""
    LOCALISATION
    ==========================================================================
 
-   Every human-readable string that lands in a rendered PNG or in the
-   preview page goes through T(key).  LANG is the single switch — set it
-   to any key in TRANSLATIONS, add new keys freely, and any key a non-
-   English table has not defined yet quietly falls back to English.
+   Every user-facing string this module writes — the render's captions,
+   the preview page's chrome, the status flash messages — comes from
+   T() in pg_i18n.py.  This module carries no LANG, no TRANSLATIONS,
+   and no T of its own: a fork that wants a different language
+   switches LANG in pg_i18n.py and translates the corresponding table
+   entry, and the export follows automatically.
 
-   Keys whose value varies with a number are FUNCTIONS of that number;
-   constant keys are plain strings.  This keeps pluralisation and
-   number-formatting decisions inside the language table where they
-   belong, instead of scattering ternaries through the renderer.
-
-   What is deliberately NOT in here:
-     • wall-segment names (W1, C1.W, SR.edge[1], …) — they are IDs.
-     • pill contents (V<n>, "h <cm>", "W <cm> . E <cm>") — symbolic.
-     • the "..." run-gap separator.
-     • unit tokens px / mm / DPI / cm. */
-
-const LANG = "en";   /* ← "en" | "es" | anything else you add below */
-
-const TRANSLATIONS = {
-  en: {
-    /* ---- rendered PNG ---- */
-    cableTitle:             "Cable",
-    subtitle:               (anchors, parts, total) =>
-      `${anchors} anchor${anchors === 1 ? "" : "s"} . ` +
-      `${parts} part${parts === 1 ? "" : "s"} . total ${total}`,
-    heightAxis:             "height (cm)",
-    lengthBreakdown:        "Length breakdown",
-    wallRuns:               "Wall runs",
-    floorRuns:              "Floor runs",
-    totalRow:               "Total",
-    legend:                 "Legend",
-    legendCable:            "cable",
-    legendWallFloorLink:    "wall<->floor link",
-    legendTraversedWall:    "traversed wall",
-    legendStepFace:         "step face (forward hatch)",
-    legendVoid:             "void (backslash hatch)",
-    wallSegmentsArrowStyle: "Wall segments . arrow style",
-
-    /* ---- preview page ---- */
-    previewTitle:           "Cable run diagrams",
-    previewSubtitle:        (n) =>
-      `${n} cable${n === 1 ? "" : "s"} - black-and-white print layout`,
-    previewHint:
-      "Each diagram is rendered at ~2200 px wide. " +
-      "For best legibility when printing, place it in your document at " +
-      "<b>180 - 210 mm</b> wide (roughly A5 landscape height).",
-    downloadAllPngs:        (n) => `Download all PNGs (${n})`,
-    downloadAllJson:        (n) => `Download all JSON (${n})`,
-    filterCollinear:        "Filter collinear vertices in strip",
-    filterCollinearTitle:   "Collapse wall-edge anchors that lie on a " +
-                            "straight run of the same wall",
-    downloadPng:            "Download PNG",
-    downloadJson:           "Download JSON",
-    cardSizeMeta:           (w, h, mm) =>
-      `${w} x ${h} px  .  ${mm} mm wide at 300 DPI`,
-    cardAlt:                (id) => `Cable ${id} run diagram`,
-    doneHint:               "Done. If your browser asks to allow multiple " +
-                            "downloads, click Allow.",
-    downloadedBundle:       "Downloaded cable_runs.json",
-
-    /* ---- status messages ---- */
-    popupBlocked:           "Popup blocked - allow popups for this page",
-    noCablesToExport:       "No cables to export",
-    nothingToExport:        (failed) =>
-      `Nothing to export - ${failed} cable(s) failed`,
-    exportedOk:             (n) =>
-      `Exported ${n} cable run${n === 1 ? "" : "s"}`,
-    exportedWithFailures:   (n, failed) =>
-      `Exported ${n} cable run${n === 1 ? "" : "s"} - ${failed} failed`,
-    exportButton:           "Export cable runs (print)",
-    exportButtonTitle:      "Render one black-and-white diagram per " +
-                            "physical cable",
-  },
-
-  es: {
-    /* ---- rendered PNG ---- */
-    cableTitle:             "Cable",
-    subtitle:               (anchors, parts, total) =>
-      `${anchors} anclaje${anchors === 1 ? "" : "s"} . ` +
-      `${parts} parte${parts === 1 ? "" : "s"} . total ${total}`,
-    heightAxis:             "altura (cm)",
-    lengthBreakdown:        "Desglose de longitud",
-    wallRuns:               "Tramos de pared",
-    floorRuns:              "Tramos de suelo",
-    totalRow:               "Total",
-    legend:                 "Leyenda",
-    legendCable:            "cable",
-    legendWallFloorLink:    "enlace pared<->suelo",
-    legendTraversedWall:    "pared atravesada",
-    legendStepFace:         "cara de escalón (rayado diag.)",
-    legendVoid:             "vacío (rayado inv.)",
-    wallSegmentsArrowStyle: "Segmentos de pared . estilo de flecha",
-
-    /* ---- preview page ---- */
-    previewTitle:           "Diagramas de tendido de cables",
-    previewSubtitle:        (n) =>
-      `${n} cable${n === 1 ? "" : "s"} - diseño de impresión en blanco y negro`,
-    previewHint:
-      "Cada diagrama se renderiza a ~2200 px de ancho. " +
-      "Para mejor legibilidad al imprimir, colóquelo en su documento a " +
-      "<b>180 - 210 mm</b> de ancho (aprox. la altura de un A5 horizontal).",
-    downloadAllPngs:        (n) => `Descargar todos los PNG (${n})`,
-    downloadAllJson:        (n) => `Descargar todos los JSON (${n})`,
-    filterCollinear:        "Filtrar vértices colineales en la tira",
-    filterCollinearTitle:   "Colapsar anclajes de borde de pared que yacen " +
-                            "sobre un tramo recto de la misma pared",
-    downloadPng:            "Descargar PNG",
-    downloadJson:           "Descargar JSON",
-    cardSizeMeta:           (w, h, mm) =>
-      `${w} x ${h} px  .  ${mm} mm de ancho a 300 DPI`,
-    cardAlt:                (id) => `Diagrama de tendido del cable ${id}`,
-    doneHint:               "Listo. Si su navegador pide permitir varias " +
-                            "descargas, pulse Permitir.",
-    downloadedBundle:       "Descargado cable_runs.json",
-
-    /* ---- status messages ---- */
-    popupBlocked:           "Ventana emergente bloqueada - permita las " +
-                            "ventanas emergentes para esta página",
-    noCablesToExport:       "No hay cables para exportar",
-    nothingToExport:        (failed) =>
-      `Nada para exportar - ${failed} cable(s) con error`,
-    exportedOk:             (n) =>
-      `Exportado${n === 1 ? "" : "s"} ${n} tendido${n === 1 ? "" : "s"} de cable`,
-    exportedWithFailures:   (n, failed) =>
-      `Exportado${n === 1 ? "" : "s"} ${n} tendido${n === 1 ? "" : "s"} de cable` +
-      ` - ${failed} con error`,
-    exportButton:           "Exportar tendidos de cable (impresión)",
-    exportButtonTitle:      "Renderiza un diagrama en blanco y negro por " +
-                            "cable físico",
-  },
-};
-
-/* Active table with English fallback for any key the active language
-   has not defined yet.  Keeps partial translations working. */
-const _T_ACTIVE = TRANSLATIONS[LANG] || TRANSLATIONS.en;
-
-function T(key) {
-  const v = _T_ACTIVE[key];
-  return (v !== undefined) ? v : TRANSLATIONS.en[key];
-}
+   See pg_i18n.py's module docstring for the pattern: keys with
+   arguments are functions of their arguments, keys without are
+   plain strings, and any key a partial translation table is missing
+   falls back to English. */
 
 /* ==========================================================================
    PRINT-FRIENDLY TEXTURES
@@ -399,6 +270,21 @@ function _pat(ctx, kind) {
 
 window.filterCollinearVerticesInStrip = false;
 
+/* Collinear-anchor filter.
+
+   Drops the middle anchor of any three consecutive wall-edge anchors
+   that sit on the same wall segment, at the same height, and on a
+   straight line through their two neighbours.
+
+   The same-segment check matters.  The room model can represent one
+   physical wall as several segments — a column flush against it, an
+   opening that punches through, a step riser that splits the stretch —
+   and the boundary between those segments is a real vertex a cable can
+   cross.  A cable running along a wall past the point where the wall
+   was split must still show the vertex there.  Keeping the vertex also
+   keeps the pill's two side-distance readings attached to the wall
+   they were measured along; collapsing across a segment boundary would
+   measure both distances against one wall and print the wrong numbers. */
 function _collapseStripCollinear(orderedIds) {
   if (!window.filterCollinearVerticesInStrip) return orderedIds.slice();
   if (orderedIds.length < 3) return orderedIds.slice();

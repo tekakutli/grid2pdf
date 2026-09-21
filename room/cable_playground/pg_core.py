@@ -10,6 +10,19 @@ The interactive half — rendering decisions, drawing gestures, event
 handlers, snap policy — lives in pg_live.py and is expected to be
 rewritten whenever we iterate on the playground's UX.
 
+Translation
+-----------
+The HTML_HEAD's button labels, the panel header's title, and the snap
+pill's text are first-paint placeholders; installVerticalMenu (pg_panel.py)
+and updateSnapPill (below) rewrite them at load from the translation
+table in pg_i18n.py.  The <div id="hint"> instructions block that used to
+sit under the panel is gone — its content now lives in
+T("popInstructionsHTML"), read by installInstructionsPopover.
+
+The four runtime strings in CORE_JS itself — the snap pill's two states,
+the draw button's two labels, the two save-flash messages, and the clear
+confirmation — route through T().  See those functions below.
+
 Assumed by pg_live.js (all defined here):
     model        — anchors, makeAnchor, resolveSpecToAnchorId
     geometry     — WALL, WALL_HEIGHT, wallAttachToPlan/U, uToWallAttach,
@@ -21,7 +34,6 @@ Assumed by pg_live.js (all defined here):
     focus        — enterFocus, exitFocus, isSegHidden
     grouping     — recomputeTrueCables, trueCableIdOf, trueCableSiblings,
                    allCables
-    resize/fit   — resize, fitViews
     persistence  — serialize, applyLoaded, doSave, loadFromServer
     panel        — collapsePanel, restorePanel
     keyboard     — keydown/keyup/blur listeners
@@ -31,7 +43,7 @@ Assumed by pg_live.js (all defined here):
 Called BY pg_core.js but defined in pg_live.js (forward references are
 resolved at call time, not parse time):
     draw, finishDraw, deleteSelectedCable, deleteSelectedVertex,
-    beginDraw, cancelDraw
+    beginDraw, cancelDraw, fitViews, T
 """
 
 
@@ -73,26 +85,26 @@ HTML_HEAD = r"""<!DOCTYPE html>
   #ui button { padding:5px 9px; cursor:pointer; border:1px solid #bbb;
                background:#f7f7f7; border-radius:4px; font-size:12px; }
   #ui button:hover { background:#eee; }
-  #ui button.primary { background:#1d4ed8; color:#fff; border-color:#1d4ed8;
+  #ui button.primary { background:#000000; color:#ffffff; border-color:#000000;
                        font-weight:600; }
+  #ui button.primary:hover { background:#222222; }
   #ui button.danger { background:#fee2e2; border-color:#fca5a5; color:#991b1b; }
-  #ui button.active { background:#0ea5e9; border-color:#0284c7; color:#fff;
+  #ui button.active { background:#d97706; border-color:#b45309; color:#ffffff;
                       font-weight:600; }
+  #ui button.active:hover { background:#b45309; }
   #ui hr { border:0; border-top:1px solid #eee; margin:9px 0; }
   #status { margin-top:8px; font-size:12px; min-height:16px; font-weight:600;
             font-family: ui-monospace, Menlo, Consolas, monospace; }
-  #status.ok  { color:#15803d; }
-  #status.bad { color:#dc2626; }
-  #status.warn{ color:#ea580c; }
-  #hint { margin-top:8px; color:#555; font-size:11px; line-height:1.55;
-          max-width:460px; }
+  #status.ok  { color:#0f766e; }
+  #status.bad { color:#b91c1c; }
+  #status.warn{ color:#b45309; }
   #snapPill {
     display:inline-block; padding:2px 8px; border-radius:10px;
     font-size:11px; font-weight:700; margin-left:6px;
     background:#e5e7eb; color:#6b7280; vertical-align:middle;
   }
-  #snapPill.on { background:#bbf7d0; color:#166534; }
-  canvas { display:block; touch-action:none; }
+  #snapPill.on { background:#ccfbf1; color:#0f766e; }
+  canvas { display:block; touch-action:none; background:#ffffff; }
 </style>
 </head>
 <body>
@@ -116,30 +128,6 @@ HTML_HEAD = r"""<!DOCTYPE html>
   </div>
   <hr>
   <div id="status"></div>
-  <div id="hint">
-    <b>Floor plan</b> (top) — <b>Unfolded wall</b> (bottom).
-    Hold <b>Shift</b> while clicking to enable snapping.<br>
-    <b>Draw cable</b>: click once, click again. If the two clicks are on the
-    same wall, a straight segment is drawn. If they are on two different
-    walls, the route planner builds a virtual straight line through every
-    physically-connected wall between them, splits it at each corner, and
-    files the pieces as one cable. Right-click undoes the last leg.
-    Enter / Esc finishes.<br>
-    <b>Alt+click</b> a vertex to connect to it, adopt its cable, or merge the
-    current drawing into it.  A plain click during drawing always creates a
-    fresh vertex — your new cable is independent of anything you click near,
-    even if the vertex lands on the same physical point as an existing one.
-    (Cross-view connections — floor↔wall — still happen automatically: the
-    two views share anchors through the wall footprint.)<br>
-    <b>Focus mode</b>: the strip narrows to the wall you clicked and its
-    physical neighbours. Visual aid — the route planner works regardless.<br>
-    <b>Hops</b> (green arcs): a cable that turns a corner between two walls
-    far apart in the strip draws a green hop arc instead of a diagonal.<br>
-    <b>Drag</b> a corner anchor: only its height moves; every partner at
-    that physical corner tracks it.<br>
-    Select a vertex, then <b>Delete</b>; with no vertex selected, <b>Delete</b>
-    removes the whole cable. Press <b>H</b> to hide / show this panel.
-  </div>
 </div>
 <button id="restoreBtn" title="Show panel (H)">☰ Show panel</button>
 <canvas id="c"></canvas>
@@ -541,7 +529,7 @@ let dpr = window.devicePixelRatio || 1;
 const layout = { floorH: 0, dividerY: 0, wallY: 0, wallH: 0 };
 const viewFloor = { scale: 1, tx: 0, ty: 0 };
 const viewWall  = { scaleX: 1, scaleY: 1, tx: 0, ty: 0, stripTopY: 0 };
-const router = { ARROW_GAP: 14, ESCAPE_DROP: 30, leftBaseX: 0, rightBaseX: 0 };
+const router = { ESCAPE_DROP: 30, leftBaseX: 0, rightBaseX: 0 };
 const ANCHOR_NEARBY_PX = 14;
 
 function w2sFloor(x, y) { return [x*viewFloor.scale + viewFloor.tx, -y*viewFloor.scale + viewFloor.ty]; }
@@ -573,11 +561,14 @@ let drawingPreview = null;
 let routeCache = [];
 const mouse = { sx: 0, sy: 0, view: null, inside: false, alt: false };
 
+/* Snap pill.  The two labels come from the translation table; the pill's
+   dot indicator is a CSS ::after pseudo-element that the stylesheet
+   switches on the .on class. */
 function updateSnapPill() {
   const el = document.getElementById("snapPill");
   if (!el) return;
-  if (snapEnabled) { el.textContent = "snap: ON (Shift)"; el.classList.add("on"); }
-  else             { el.textContent = "snap: off";        el.classList.remove("on"); }
+  if (snapEnabled) { el.textContent = T("snapOn");  el.classList.add("on"); }
+  else             { el.textContent = T("snapOff"); el.classList.remove("on"); }
 }
 
 /* ==========================================================================
@@ -1001,8 +992,8 @@ async function loadFromServer() {
 }
 async function doSave() {
   const ok = await saveToServer();
-  if (ok) flashStatus("✓ Saved " + STATE_FILE, "ok");
-  else    flashStatus("✗ Save failed (no server?)", "bad");
+  if (ok) flashStatus(T("msgSavedOk")(STATE_FILE), "ok");
+  else    flashStatus(T("msgSaveFailed"),        "bad");
 }
 
 /* ==========================================================================
@@ -1087,10 +1078,10 @@ function updateDrawButton() {
   if (!drawBtnEl) return;
   if (drawing) {
     drawBtnEl.classList.add("active");
-    drawBtnEl.textContent = "✖ Cancel draw";
+    drawBtnEl.textContent = T("btnCancelDraw");
   } else {
     drawBtnEl.classList.remove("active");
-    drawBtnEl.textContent = "✏️ Draw cable";
+    drawBtnEl.textContent = T("btnDrawCable");
   }
 }
 
@@ -1108,6 +1099,8 @@ BOOT_JS = r"""
 /* ==========================================================================
    BOOTSTRAP
    ========================================================================== */
+
+document.title = T("pageTitle");
 
 document.getElementById("addNsGrid").onclick    = addFloorNsGrid;
 document.getElementById("addEwGrid").onclick    = addFloorEwGrid;

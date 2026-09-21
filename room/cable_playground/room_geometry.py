@@ -2,7 +2,7 @@
 room_geometry.py — extract wall geometry from room.step + room_walls.json.
 
 Reads the STEP model produced by room.py and the sidecar room_walls.json
-(v3 schema), and returns a `geom` dict:
+and returns a `geom` dict:
 
     {
         "faces":        [...],   # wall footprint polygons at cut height
@@ -23,6 +23,12 @@ Reads the STEP model produced by room.py and the sidecar room_walls.json
 The unfolded-wall strip is built from room_walls.json's `surfaces` via the
 spatial ordering helpers below.  The STEP fallback (morphological close on
 the largest hole) is used only when room_walls.json is missing.
+
+The sidecar carries a `version` field and this reader dispatches on it,
+upgrading older formats to the current shape before returning.  A sidecar
+whose version is newer than any format this reader recognises is accepted
+on the assumption that the shape of the `surfaces` array it reads has not
+changed between then and now.
 """
 
 import json
