@@ -65,7 +65,7 @@ const PARALLEL_TOL = Math.PI / 12;
    / boundary tiers (1e11): strong enough to make the optimiser trade
    a second crossing for a first crossing elsewhere, weak enough that
    it never beats avoiding a parallel overlap or a boundary hug. */
-const DOUBLE_CROSS_EXTRA_W = 5e10;
+const DOUBLE_CROSS_EXTRA_W = 1e11;
 
 function _pointSegDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay;
@@ -86,9 +86,51 @@ function _segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
 }
 
 function _pathSegments(path, pathIdx, minLen) {
+  /* First, collapse consecutive collinear points.
+
+     Two segments that share a vertex and lie on the same line are
+     the same drawn line.  Splitting them at the shared vertex turns
+     a T-junction — the endpoint of one leader's polyline touching
+     the interior of another's — into two endpoint touches, both of
+     which _segSegProperCross rejects.  The crossing at that touch
+     is real: the vertical continues on both sides of the horizontal
+     it touches.  Merging the two collinear segments back into one
+     restores the interior parameter, and the crossing counts.
+
+     This is the fix for V24 × V27: V27's descent from the channel
+     down to the detour band is three consecutive collinear verticals
+     at x = 811.45, and V24's channel horizontal at y = 144 touches
+     them at their shared vertex (811.45, 144).  Without the merge
+     the touch is a pair of endpoint contacts and V24 is classified
+     as clean, so the optimiser never tries the diveMode = 2 that
+     clears the pair. */
+  const pts = [];
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    if (pts.length >= 2) {
+      const a = pts[pts.length - 2];
+      const b = pts[pts.length - 1];
+      const abx = b[0] - a[0], aby = b[1] - a[1];
+      const bcx = p[0] - b[0], bcy = p[1] - b[1];
+      const cross = abx * bcy - aby * bcx;
+      if (Math.abs(cross) < 1e-3) {
+        /* a, b, p are collinear.  If b is between a and p (same
+           direction), drop b.  If p is between a and b (reverse),
+           skip p. */
+        const dot = abx * bcx + aby * bcy;
+        if (dot > 0) {
+          pts.pop();
+        } else {
+          continue;
+        }
+      }
+    }
+    pts.push(p);
+  }
+
   const out = [];
-  for (let i = 0; i < path.length - 1; i++) {
-    const a = path[i], b = path[i + 1];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const len = Math.hypot(dx, dy);
     if (len < minLen) continue;

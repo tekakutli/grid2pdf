@@ -403,7 +403,8 @@ function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks,
 
         channelYRel: (typeof it.channelYRel === "number")
                      ? _r2(it.channelYRel) : null,
-        offsetA:  _r2(it.offsetA  || 0),
+        offsetA:    _r2(it.offsetA    || 0),
+        detourBias: _r2(it.detourBias || 0),
         diveMode: it.diveMode || 0,
         bevel0:   _r2(it.bevel0 || 0),
         bevel1:   _r2(it.bevel1 || 0),

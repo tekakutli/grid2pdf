@@ -1,7 +1,7 @@
 """
 pg_export_optimizer.py — the leader-geometry optimiser.
 
-Five move families, all tried in one pass, plus the jog-direction
+Six move families, all tried in one pass, plus the jog-direction
 guard that keeps a back-step jog from ever being accepted:
 
     field          moves                              step grid
@@ -9,60 +9,95 @@ guard that keeps a back-step jog from ever being accepted:
     bevel0/bevel1  the two corner cuts                3 px
     jog0/jog1      the two nearest-leg X offsets      3 px
     diveMode       0/1/2, the anchor leg's shape      discrete
-    channelYRel    the horizontal run's Y             12 items
-    offsetA        the anchor leg's X displacement    4 items
+    channelYRel    the horizontal run's Y             8 items
+    offsetA        the anchor leg's X displacement    10 items
+    detourBias     the tail's detour column offset    4 items
 
 Every parameter that describes a leader's geometry is optimisable.
+
+The detour bias
+---------------
+The tail — the descent from the channel down to the pill — is built
+by _buildChannelToPill from pillX, chanY and pillTopY.  When a
+blocker sits on the pillX column, the tail jogs around it: out at
+entryY to a detour column, down to exitY, back at exitY to pillX.
+That detour rectangle is what frequently intersects a neighbour's
+descent twice, and neither channelYRel nor offsetA can move it —
+those parameters control the horizontal run and the anchor leg
+upstream of the tail, not the tail itself.
+
+detourBias is a per-leader numeric offset added to the detour column
+after the auto-search picks one.  It is applied only when the biased
+column is still clear of every foreign box in the tail's y-range, so
+it can never make a good detour worse.  The optimiser's single-move
+loop and the coordinated pair refinement both try the same four
+candidate values (-40, -20, +20, +40), which is enough to shift a
+detour rectangle clear of a neighbouring descent on either side.
 
 The conflicted-leader filter
 ----------------------------
 The pass loop tries moves only for leaders that participate in some
-conflict.  Building that filter is a query against the current layout,
-and the query has to see every class of conflict the score sees — not
-just segment-segment and segment-pill, but also boundary, wall-edge,
-and parallel-wire proximity.
+conflict, using the obstacle context so the filter sees boundary,
+wall-edge, and parallel-wire conflicts exactly as the score does.
 
-An earlier revision called _conflictedLeaderIndices(layout) without
-passing the obstacle context.  Without the context, the filter only
-saw segment-segment and segment-pill conflicts.  A leader whose only
-conflict was with a wall-section boundary — like V15 whose descent
-sat 0.03 px from a boundary — was classified as clean, skipped by the
-optimiser, and left at offsetA = 0 forever.  The score still charged
-the boundary, so the layout was judged as conflicted; but the machine
-that decides WHICH leader to move couldn't see the boundary, so no
-candidate move was ever tried.
+Coordinated refinement
+----------------------
+A single move can usually fix a base conflict, a boundary hug, or a
+pill proximity.  It cannot fix a double crossing: eliminating the
+second crossing between two specific leaders usually requires both
+of them to shift at once, and any single move that shifts one leader
+far enough to break the double crossing tends to introduce a new
+conflict somewhere else, so the score rejects the move and the pass
+loop stalls.
 
-Passing the context is the fix: the filter now returns the same set
-of conflicted leaders that the score charges.
+The coordinated pass runs once at the end of optimizeLeaderGeometry.
+It has two phases:
+
+    Pass 1 — 2-way.  For each bad pair (A, B) with 2 or more proper
+    crossings, try every combination of channelYRel / offsetA /
+    detourBias on both leaders and every cross-parameter combination
+    (A's lane with B's offset, and so on).  Apply the best.
+
+    Pass 2 — 3-way.  A 2-way move sometimes fixes the pair while
+    creating a fresh double crossing with a third leader C — the
+    V24 × V27 case, where V24's diveMode 2 clears V27 but puts
+    V24's anchor leg through V23's horizontal.  For that case the
+    pair cannot be fixed without also moving C.  The 3-way pass
+    identifies C as the leader whose path is nearest to the pair's
+    crossing points, and then searches (A.diveMode, C.diveMode) and
+    (A.diveMode, C.channelYRel) and (A.diveMode, C.offsetA) pairs
+    — the three most productive combinations in practice — for the
+    highest-severity bad pairs.
+
+The search then runs a second time on the new state, so a two-step
+fix still lands.
 
 Pill-box proximity
 ------------------
 The tier-2b segment-vs-foreign-pill test expands the pill box by
 PILL_PROX before the Liang-Barsky clip.  A leader segment running
 within PILL_PROX of a foreign pill edge counts as a conflict even
-when it does not intersect the box, so the optimiser has a reason to
-look for a geometry that opens a gap.
+when it does not intersect the box.
 
 The channel-to-pill tail
 ------------------------
-A tail goes from (pillX, chanY) down to (pillX, pillTopY).  It must
-avoid every foreign pill box in that y-range, and it must END at
-(pillX, pillTopY) — the top-centre of the leader's own pill.
+A tail goes from (pillX, chanY) down to (pillX, pillTopY), always
+ending at (pillX, pillTopY).  If the pillX column is clear of every
+foreign box in that y-range the tail is a straight drop; otherwise
+each blocker band is jogged around:
 
     • collect every foreign box overlapping [chanY, pillTopY];
     • compute the bands where pillX is blocked (merged when within
-      2*M of each other so consecutive blockers behave as one);
-    • for each band, jog around it:
-        - descend at pillX from curY to the band's entry;
-        - horizontal at entryY from pillX to detourX;
-        - descend at detourX from entryY to exitY;
-        - horizontal at exitY from detourX back to pillX;
+      2*M of each other);
+    • for each band: descend at pillX to the band's entry, jog at
+      entryY to the chosen detourX, descend at detourX to exitY,
+      jog back at exitY to pillX;
     • after the last band, descend at pillX to pillTopY.
 
 entryY and exitY are clamped to [chanY, pillTopY], and a band whose
-clamp collapses is skipped entirely.  The detour column for each band
-is the nearest edge of the band's union, walked outward in 6-px steps
-if the immediate candidate is itself blocked.
+clamp collapses is skipped entirely.  The detour column for each
+band is the nearest edge of the band's union, walked outward in 6-px
+steps if the immediate candidate is blocked by another box.
 
 Jog-direction guard
 -------------------
@@ -126,11 +161,21 @@ const OPT_MAX_PASSES  = 8;
      • hClear(exitY,  pillX, detourX)      — the bottom jog.
 
    If no candidate within the walk passes all three, the band falls
-   back to the preferred edge regardless. */
+   back to the preferred edge regardless.
+
+   detourBias
+   ----------
+   After the auto-search picks a detourX for a band, the leader's
+   detourBias is added to it.  The biased column is used only when it
+   still passes all three clearance tests; otherwise the auto column
+   is kept.  This lets the optimiser move the entire detour rectangle
+   sideways — which neither channelYRel nor offsetA can do — without
+   ever making a good detour worse. */
 function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
                               stripBottom, topPad, trackOffsets) {
   const M = 4;
   const EPS = 2;
+  const bias = (self && self.detourBias) || 0;
 
   const boxes = [];
   for (const Q of placed) {
@@ -224,6 +269,17 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     }
     if (detourX === null) {
       detourX = preferRight ? rightX : leftX;
+    }
+
+    /* Apply detourBias only when the biased column remains clear.
+       If the bias points into a blocker, keep the auto column. */
+    if (bias !== 0) {
+      const biased = detourX + bias;
+      if (vClear(biased, entryY, exitY) &&
+          hClear(entryY, pillX, biased) &&
+          hClear(exitY,  pillX, biased)) {
+        detourX = biased;
+      }
     }
 
     out.push([detourX, entryY]);
@@ -415,27 +471,42 @@ const CHANNEL_Y_STEPS = [
   -24, -16, -8, -4, 4, 8, 16, 24, 32, 40, -32, -40,
 ];
 
-const OFFSET_A_STEPS = [-8, -2, 2, 8];
+/* offsetA candidates.  The current value is tested against each of
+   these deltas.  The earlier ±8 range was too tight for the case
+   where a leader's anchor is far to one side of its pill: V24's
+   anchor is 81 px right of its pill, and only a shift of ~80 px in
+   the lateral direction clears V24's anchor leg out of its
+   neighbour's horizontal run.  The larger magnitudes let the
+   optimiser reach that shift in one step instead of relying on many
+   small passes to accumulate. */
+const OFFSET_A_STEPS = [-80, -48, -24, -8, -2, 2, 8, 24, 48, 80];
+
+/* Detour bias candidates.  Each value is an absolute offset from the
+   auto-chosen detour column, in pixels.  Applied only when the biased
+   column still passes the three clearance tests inside the tail. */
+const DETOUR_BIAS_STEPS = [-40, -20, 20, 40];
 
 /* ==========================================================================
    LEADER GEOMETRY OPTIMISER
    ==========================================================================
-   Five move families, all tried in one pass.  Each candidate move is
+   Six move families, all tried in one pass.  Each candidate move is
    scored against the layout with the complete exhaustive tier list.
    Only strictly-improving moves are accepted.
 
-   The pass loop skips leaders with no conflict at all.  "Conflict"
-   here means any conflict the SCORE charges for — segment-segment,
-   segment-pill, boundary, wall-edge, or parallel-wire.  The
-   conflictedLeaderIndices filter is built with the same obstacle
-   context the pill push uses, so the two agree on which leaders
-   matter. */
+   The pass loop skips leaders with no conflict at all.  A conflict
+   here means any conflict the score charges for — segment-segment,
+   segment-pill, boundary, wall-edge, parallel-wire, or a second
+   crossing between the same pair.
+
+   After the pass loop, a coordinated refinement runs twice.  See the
+   module docstring for the rationale and the 2-way / 3-way split. */
 function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                                 boundaries, wireSegments, wallEdges) {
   for (const it of placed) {
     it.bevel0 = 0; it.bevel1 = 0;
     it.jog0   = 0; it.jog1   = 0;
     it.diveMode = 0;
+    if (typeof it.detourBias !== "number") it.detourBias = 0;
   }
   if (placed.length < 2) return;
 
@@ -443,11 +514,6 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
   const wires = Array.isArray(wireSegments) ? wireSegments : [];
   const wes   = Array.isArray(wallEdges)    ? wallEdges    : [];
 
-  /* The obstacle context: everything the conflicted-leader filter
-     needs to see boundary, wall-edge, and parallel-wire conflicts
-     the same way the score does.  Without this, a leader whose only
-     conflict is with a wall-section boundary is filtered out as
-     "clean" and no candidate move is ever tried for it. */
   const obstacleContext = {
     boundaries:   bxs,
     wireSegments: wires,
@@ -500,6 +566,15 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
       }
     }
 
+    /* --- tier 1b: double crossings --- */
+    let extraCrossings = 0;
+    for (let i = 0; i < pathSegs.length; i++) {
+      for (let j = i + 1; j < pathSegs.length; j++) {
+        const n = _countSegmentCrossings(pathSegs[i], pathSegs[j]);
+        if (n >= 2) extraCrossings += (n - 1);
+      }
+    }
+
     /* --- tier 2b: segment vs foreign pill AABB, expanded by
        PILL_PROX so a segment running alongside a pill counts --- */
     let pillCount = 0, pillDepth = 0;
@@ -520,28 +595,6 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           const t = _segBoxOverlap(s, expanded);
           if (t > 0) { pillCount++; pillDepth += t; }
         }
-      }
-    }
-
-    /* --- tier 1b: double crossings ---
-
-       A leader pair that crosses once is routing.  A pair that
-       crosses twice is weaving.  The extra crossings are counted
-       here and charged at a tier of their own, above the head
-       tier, so that the optimiser trades a second crossing for a
-       first crossing elsewhere rather than accumulating crossings
-       on a single pair.
-
-       The score term is `extraCrossings × DOUBLE_CROSS_EXTRA_W`,
-       where extraCrossings = Σ_pairs max(0, crossings(pair) − 1).
-       Independent single crossings are unaffected: a pair with one
-       crossing contributes zero here and its cost continues to be
-       the ordinary segment-segment tier below. */
-    let extraCrossings = 0;
-    for (let i = 0; i < pathSegs.length; i++) {
-      for (let j = i + 1; j < pathSegs.length; j++) {
-        const n = _countSegmentCrossings(pathSegs[i], pathSegs[j]);
-        if (n >= 2) extraCrossings += (n - 1);
       }
     }
 
@@ -693,12 +746,9 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
   let cur = evaluate();
   if (cur.score < 1) return;
 
+  /* ---- Main pass loop ---- */
   for (let pass = 0; pass < OPT_MAX_PASSES; pass++) {
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-    /* Pass the obstacle context so the filter sees boundary,
-       wall-edge, and parallel-wire conflicts, exactly as the score
-       does.  Without it, a leader whose only conflict is with a
-       boundary is filtered out as clean and never given a chance. */
     const conflicted = _conflictedLeaderIndices(layout, obstacleContext);
 
     let best = null;
@@ -774,12 +824,384 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           }
         }
       }
+
+      /* --- detourBias --- */
+      const curBias = it.detourBias || 0;
+      for (const cand of DETOUR_BIAS_STEPS) {
+        if (cand === curBias) continue;
+        const saved = it.detourBias;
+        it.detourBias = cand;
+        const test = evaluate();
+        it.detourBias = saved;
+
+        if (test.score < cur.score - 0.5) {
+          if (!best || test.score < best.test.score) {
+            best = { it, field: 'detourBias', newValue: cand, test };
+          }
+        }
+      }
     }
 
     if (!best) break;
     best.it[best.field] = best.newValue;
     cur = best.test;
     if (cur.score < 1) break;
+  }
+
+  /* ==========================================================================
+     COORDINATED PAIR REFINEMENT
+     ==========================================================================
+
+     Single-variable moves stall on double crossings: eliminating the
+     second crossing between two leaders usually requires both of
+     them to shift at once, and any single move that shifts one
+     leader far enough tends to introduce a new conflict that the
+     score rejects.
+
+     Pass 1 — 2-way.  For each bad pair (A, B) with 2 or more proper
+     crossings, try every combination of channelYRel / offsetA /
+     detourBias on both leaders and every cross-parameter combination
+     (A's lane with B's offset, and so on).  Apply the best.
+
+     Pass 2 — 3-way.  A 2-way move sometimes fixes the pair while
+     creating a fresh double crossing with a third leader C — the
+     V24 × V27 case, where V24's diveMode 2 clears V27 but puts
+     V24's anchor leg through V23's horizontal.  For that case the
+     pair cannot be fixed without also moving C.  The 3-way pass
+     identifies C as the leader whose path is nearest to the pair's
+     crossing points, and then searches (A.diveMode, C.diveMode) and
+     (A.diveMode, C.channelYRel) and (A.diveMode, C.offsetA) pairs
+     — the three most productive combinations in practice — for the
+     highest-severity bad pairs.
+
+     The search runs a second iteration on the new state, so a
+     two-step fix still lands.
+
+     Naming note: the bystander's index is `bystanderIdx`, the
+     bystander's object is `C`, and the winning move on C is
+     `bestCMove`.  An earlier revision used `bestC` for both the
+     index and the winning move, which was a `let` redeclaration in
+     the same block scope and a parse error at load time. */
+  {
+    const laneChoices   = [2, 6, 10, 14, 18, 22, 26, 30];
+    const offsetChoices = [0, -80, -48, -24, -16, -8, 8, 16, 24, 48, 80];
+    const biasChoices   = [0, -40, -20, 20, 40];
+
+    for (let iter = 0; iter < 2; iter++) {
+      const layout0 = _buildLayout(placed, stripH, topPad, trackOffsets);
+      const badPairs = [];
+      for (let i = 0; i < placed.length; i++) {
+        for (let j = i + 1; j < placed.length; j++) {
+          const xc = _countSegmentCrossings(layout0.segs[i], layout0.segs[j]);
+          if (xc >= 2) badPairs.push({ i, j, xc });
+        }
+      }
+      if (!badPairs.length) break;
+      badPairs.sort((a, b) => b.xc - a.xc);
+
+      let anyImproved = false;
+
+      /* ---- Pass 1: 2-way coordinated ---- */
+      for (let k = 0; k < Math.min(badPairs.length, 8); k++) {
+        const { i, j } = badPairs[k];
+        const A = placed[i], B = placed[j];
+
+        const aOrigLane = A.channelYRel;
+        const aOrigOff  = A.offsetA || 0;
+        const aOrigBias = A.detourBias || 0;
+        const bOrigLane = B.channelYRel;
+        const bOrigOff  = B.offsetA || 0;
+        const bOrigBias = B.detourBias || 0;
+
+        let bestScore = cur.score;
+        let bestALane = aOrigLane, bestAOff = aOrigOff, bestABias = aOrigBias;
+        let bestBLane = bOrigLane, bestBOff = bOrigOff, bestBBias = bOrigBias;
+
+        /* (lane, lane) */
+        for (const aLane of laneChoices) {
+          if (aLane >= topPad - 2) continue;
+          A.channelYRel = aLane;
+          for (const bLane of laneChoices) {
+            if (bLane >= topPad - 2) continue;
+            B.channelYRel = bLane;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestALane = aLane; bestBLane = bLane;
+              bestAOff = aOrigOff; bestBOff = bOrigOff;
+              bestABias = aOrigBias; bestBBias = bOrigBias;
+            }
+          }
+        }
+        A.channelYRel = aOrigLane; B.channelYRel = bOrigLane;
+
+        /* (offset, offset) */
+        for (const aOff of offsetChoices) {
+          A.offsetA = aOff;
+          for (const bOff of offsetChoices) {
+            B.offsetA = bOff;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAOff = aOff; bestBOff = bOff;
+              bestALane = aOrigLane; bestBLane = bOrigLane;
+              bestABias = aOrigBias; bestBBias = bOrigBias;
+            }
+          }
+        }
+        A.offsetA = aOrigOff; B.offsetA = bOrigOff;
+
+        /* (bias, bias) */
+        for (const aBias of biasChoices) {
+          A.detourBias = aBias;
+          for (const bBias of biasChoices) {
+            B.detourBias = bBias;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestABias = aBias; bestBBias = bBias;
+              bestALane = aOrigLane; bestBLane = bOrigLane;
+              bestAOff = aOrigOff; bestBOff = bOrigOff;
+            }
+          }
+        }
+        A.detourBias = aOrigBias; B.detourBias = bOrigBias;
+
+        /* (lane A, offset B) and (offset A, lane B) */
+        for (const aLane of laneChoices) {
+          if (aLane >= topPad - 2) continue;
+          A.channelYRel = aLane;
+          for (const bOff of offsetChoices) {
+            B.offsetA = bOff;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestALane = aLane; bestBOff = bOff;
+              bestBLane = bOrigLane; bestAOff = aOrigOff;
+              bestABias = aOrigBias; bestBBias = bOrigBias;
+            }
+          }
+        }
+        A.channelYRel = aOrigLane; B.offsetA = bOrigOff;
+
+        for (const aOff of offsetChoices) {
+          A.offsetA = aOff;
+          for (const bLane of laneChoices) {
+            if (bLane >= topPad - 2) continue;
+            B.channelYRel = bLane;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAOff = aOff; bestBLane = bLane;
+              bestALane = aOrigLane; bestBOff = bOrigOff;
+              bestABias = aOrigBias; bestBBias = bOrigBias;
+            }
+          }
+        }
+        A.offsetA = aOrigOff; B.channelYRel = bOrigLane;
+
+        /* (lane A, bias B) and (bias A, lane B) */
+        for (const aLane of laneChoices) {
+          if (aLane >= topPad - 2) continue;
+          A.channelYRel = aLane;
+          for (const bBias of biasChoices) {
+            B.detourBias = bBias;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestALane = aLane; bestBBias = bBias;
+              bestBLane = bOrigLane; bestABias = aOrigBias;
+              bestAOff = aOrigOff; bestBOff = bOrigOff;
+            }
+          }
+        }
+        A.channelYRel = aOrigLane; B.detourBias = bOrigBias;
+
+        for (const aBias of biasChoices) {
+          A.detourBias = aBias;
+          for (const bLane of laneChoices) {
+            if (bLane >= topPad - 2) continue;
+            B.channelYRel = bLane;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestABias = aBias; bestBLane = bLane;
+              bestALane = aOrigLane; bestBBias = bOrigBias;
+              bestAOff = aOrigOff; bestBOff = bOrigOff;
+            }
+          }
+        }
+        A.detourBias = aOrigBias; B.channelYRel = bOrigLane;
+
+        /* (offset A, bias B) and (bias A, offset B) */
+        for (const aOff of offsetChoices) {
+          A.offsetA = aOff;
+          for (const bBias of biasChoices) {
+            B.detourBias = bBias;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAOff = aOff; bestBBias = bBias;
+              bestALane = aOrigLane; bestBLane = bOrigLane;
+              bestABias = aOrigBias; bestBOff = bOrigOff;
+            }
+          }
+        }
+        A.offsetA = aOrigOff; B.detourBias = bOrigBias;
+
+        for (const aBias of biasChoices) {
+          A.detourBias = aBias;
+          for (const bOff of offsetChoices) {
+            B.offsetA = bOff;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestABias = aBias; bestBOff = bOff;
+              bestALane = aOrigLane; bestBLane = bOrigLane;
+              bestAOff = aOrigOff; bestBBias = bOrigBias;
+            }
+          }
+        }
+        A.detourBias = aOrigBias; B.offsetA = bOrigOff;
+
+        /* Apply the best combination found. */
+        A.channelYRel = bestALane;
+        A.offsetA     = bestAOff;
+        A.detourBias  = bestABias;
+        B.channelYRel = bestBLane;
+        B.offsetA     = bestBOff;
+        B.detourBias  = bestBBias;
+
+        if (bestScore < cur.score - 0.5) {
+          cur = { score: bestScore };
+          anyImproved = true;
+        }
+      }
+
+      /* ---- Pass 2: 3-way with the bystander ----
+
+         For each bad pair (A, B), find the leader C whose path comes
+         nearest to the pair's crossing points, and try moving A and
+         C together.  The diveMode pair is tried first — that is the
+         most productive combination — followed by (A.diveMode,
+         C.channelYRel) and (A.diveMode, C.offsetA).  The three
+         parameter pools give 3 * 3 + 3 * 8 + 3 * 11 = 66 evaluations
+         per pair; on the top four pairs that is under 300 total.
+
+         This is what lets V24 × V27 be resolved: V24's diveMode 2
+         clears its crossings with V27, and V23's diveMode 2 clears
+         the crossings V24's new anchor leg would otherwise make
+         through V23's horizontal.  Neither move helps alone, both
+         help together. */
+      for (let k = 0; k < Math.min(badPairs.length, 4); k++) {
+        const { i, j } = badPairs[k];
+        const A = placed[i], B = placed[j];
+
+        /* The pair's crossing points. */
+        const cps = [];
+        for (const sa of layout0.segs[i]) {
+          for (const sb of layout0.segs[j]) {
+            if (!_segSegProperCross(sa, sb)) continue;
+            const d1x = sa.bx - sa.ax, d1y = sa.by - sa.ay;
+            const d2x = sb.bx - sb.ax, d2y = sb.by - sb.ay;
+            const denom = d1x * d2y - d1y * d2x;
+            const rx = sb.ax - sa.ax, ry = sb.ay - sa.ay;
+            const t = (rx * d2y - ry * d2x) / denom;
+            cps.push([sa.ax + t * d1x, sa.ay + t * d1y]);
+          }
+        }
+        if (cps.length < 2) continue;
+
+        /* Nearest leader to those crossing points. */
+        let bystanderIdx = -1, bystanderDist = 50;
+        for (let q = 0; q < placed.length; q++) {
+          if (q === i || q === j) continue;
+          for (const cp of cps) {
+            for (const s of layout0.segs[q]) {
+              const d = _pointSegDist(cp[0], cp[1],
+                                       s.ax, s.ay, s.bx, s.by);
+              if (d < bystanderDist) {
+                bystanderDist = d;
+                bystanderIdx = q;
+              }
+            }
+          }
+        }
+        if (bystanderIdx < 0) continue;
+
+        const C = placed[bystanderIdx];
+        const aSave = { diveMode: A.diveMode, channelYRel: A.channelYRel,
+                        offsetA: A.offsetA, detourBias: A.detourBias };
+        const cSave = { diveMode: C.diveMode, channelYRel: C.channelYRel,
+                        offsetA: C.offsetA, detourBias: C.detourBias };
+
+        let bestScore = cur.score;
+        let bestAMove = null, bestCMove = null;
+
+        /* (A.diveMode, C.diveMode) */
+        for (const aD of [0, 1, 2]) {
+          if (aD === aSave.diveMode) continue;
+          A.diveMode = aD;
+          for (const cD of [0, 1, 2]) {
+            if (cD === cSave.diveMode) continue;
+            C.diveMode = cD;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAMove = { field: "diveMode", value: aD };
+              bestCMove = { field: "diveMode", value: cD };
+            }
+          }
+        }
+        A.diveMode = aSave.diveMode;
+        C.diveMode = cSave.diveMode;
+
+        /* (A.diveMode, C.channelYRel) */
+        for (const aD of [0, 1, 2]) {
+          if (aD === aSave.diveMode) continue;
+          A.diveMode = aD;
+          for (const cL of laneChoices) {
+            if (cL >= topPad - 2 || cL === cSave.channelYRel) continue;
+            C.channelYRel = cL;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAMove = { field: "diveMode", value: aD };
+              bestCMove = { field: "channelYRel", value: cL };
+            }
+          }
+        }
+        A.diveMode = aSave.diveMode;
+        C.channelYRel = cSave.channelYRel;
+
+        /* (A.diveMode, C.offsetA) */
+        for (const aD of [0, 1, 2]) {
+          if (aD === aSave.diveMode) continue;
+          A.diveMode = aD;
+          for (const cO of offsetChoices) {
+            if (cO === cSave.offsetA) continue;
+            C.offsetA = cO;
+            const s = evaluate().score;
+            if (s < bestScore - 0.5) {
+              bestScore = s;
+              bestAMove = { field: "diveMode", value: aD };
+              bestCMove = { field: "offsetA", value: cO };
+            }
+          }
+        }
+        A.diveMode = aSave.diveMode;
+        C.offsetA = cSave.offsetA;
+
+        if (bestAMove && bestCMove) {
+          A[bestAMove.field] = bestAMove.value;
+          C[bestCMove.field] = bestCMove.value;
+          cur = { score: bestScore };
+          anyImproved = true;
+        }
+      }
+
+      if (!anyImproved) break;
+    }
   }
 }
 """
