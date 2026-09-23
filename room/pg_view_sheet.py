@@ -416,10 +416,154 @@ function drawDimensionChain(view) {
 
    Only one of these can be active per frame, chosen by the same
    reuse policy addDrawPoint uses, so what the user sees during
-   hover is exactly what the next click will commit. */
+   hover is exactly what the next click will commit.
+
+   Snap-candidate feedback
+   -----------------------
+   drawSnapCandidates shows every anchor the current click would
+   reuse, so the user can see what they are about to snap to before
+   committing.  Three tiers, from loudest to quietest:
+
+       primary in range     the anchor that would actually be picked
+                            — a solid teal ring with a filled centre,
+                            the same visual the earlier single-target
+                            merge-target preview used.
+       secondary in range   other candidates within the reuse
+                            threshold — thin teal rings.  They would
+                            be picked if the cursor moved closer.
+       out of range         candidates the cursor is near but not
+                            close enough to actually reuse — faint
+                            dashed grey rings.  "Move closer and this
+                            becomes selectable."
+
+   The candidate set is exactly what isReusableAnchor(a, mouse.alt,
+   view) accepts, minus the anchors already in the current drawing
+   (those are the ghost's own vertices, not fresh snap targets).
+   The in-range threshold matches ANCHOR_NEARBY_PX and
+   findMergeTarget's 14 px, so the visuals never lie about what a
+   click will do.
+
+   drawSnapCandidates runs whenever the cursor is over the view it
+   is called for — INCLUDING before the first point is placed, when
+   drawing.view is still null.  The earlier design gated the whole
+   preview on drawing.view === view, which meant no snap feedback
+   appeared until after the first click; that gate is now split,
+   with the ghost line still gated but the candidate feedback not.
+
+   The old single-target block that used findMergeTarget is gone —
+   drawSnapCandidates covers that case and shows the full candidate
+   set at once.  findMergeTarget itself is unchanged and still used
+   by addDrawPoint; only the preview stopped calling it. */
+
+/* Reuse thresholds, in SCREEN pixels.  SNAP_IN_RANGE_PX matches
+   ANCHOR_NEARBY_PX in pg_core and findMergeTarget's own 14; a click
+   at or under this distance will reuse the anchor.  SNAP_VISIBLE_PX
+   is the outer halo where a ring is still drawn but the click would
+   not reuse — the "almost, move closer" band. */
+const SNAP_IN_RANGE_PX = 14;
+const SNAP_VISIBLE_PX  = 26;
+
+function drawSnapCandidates(view) {
+  const project  = (view === "floor") ? anchorPlan : anchorWall;
+  const toScreen = (view === "floor") ? w2sFloor   : w2sWall;
+
+  const candidates = [];
+  for (const a of anchors.values()) {
+    if (view === "wall" && a.space === "wall-edge" && isSegHidden(a.segIdx))
+      continue;
+    if (!isReusableAnchor(a, mouse.alt, view)) continue;
+    if (drawing.anchorIds.indexOf(a.id) >= 0) continue;
+
+    const p = project(a);
+    if (!p) continue;
+    const [sx, sy] = toScreen(p[0], p[1]);
+    const d = Math.hypot(sx - mouse.sx, sy - mouse.sy);
+    if (d > SNAP_VISIBLE_PX) continue;
+
+    candidates.push({ sx, sy, d });
+  }
+  if (!candidates.length) return;
+
+  candidates.sort((x, y) => x.d - y.d);
+  const primary = candidates[0];
+
+  ctx.save();
+  ctx.lineCap = "round";
+
+  /* Secondary rings, drawn first so the primary overlays them. */
+  for (let i = candidates.length - 1; i >= 1; i--) {
+    const c = candidates[i];
+    const inRange = c.d <= SNAP_IN_RANGE_PX;
+    ctx.beginPath();
+    ctx.arc(c.sx, c.sy, 8, 0, Math.PI * 2);
+    if (inRange) {
+      ctx.strokeStyle = PALETTE.transitSoft;
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = PALETTE.inkFaint;
+      ctx.lineWidth = 1.0;
+      ctx.setLineDash([2, 2]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* Primary ring — solid teal when in range, dashed grey when the
+     cursor is still outside the reuse threshold.  The centre dot
+     only appears when the click would actually reuse this anchor,
+     so "does clicking do anything" is answerable at a glance. */
+  const inRange = primary.d <= SNAP_IN_RANGE_PX;
+  const ringR   = inRange ? 12 : 10;
+  ctx.beginPath();
+  ctx.arc(primary.sx, primary.sy, ringR, 0, Math.PI * 2);
+  if (inRange) {
+    ctx.strokeStyle = PALETTE.transit;
+    ctx.lineWidth = 2.6;
+    ctx.setLineDash([]);
+  } else {
+    ctx.strokeStyle = PALETTE.inkSoft;
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([3, 3]);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (inRange) {
+    ctx.beginPath();
+    ctx.arc(primary.sx, primary.sy, 5, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE.transitFaint;
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
 
 function drawDrawingPreview(view) {
-  if (!drawing || drawing.view !== view) return;
+  if (!drawing) return;
+
+  /* Snap-candidate feedback fires whenever the cursor is over the
+     view this call is for, regardless of whether the drawing owns
+     that view yet.  Two cases:
+
+       drawing.view === null   no first point placed; the cursor
+                               could go to either band, so whichever
+                               band the cursor is over shows its
+                               candidates.
+       drawing.view === view   drawing locked to this band; show its
+                               candidates.
+
+     Any other combination means the drawing is committed to the
+     other band and the cursor is here — a click would be rejected
+     by addDrawPoint, so no rings are shown. */
+  const candidateViewOK =
+    (drawing.view === null) || (drawing.view === view);
+  if (candidateViewOK && mouse.inside && mouse.view === view) {
+    drawSnapCandidates(view);
+  }
+
+  if (drawing.view !== view) return;
+
   const toScreen = (view === "floor") ? w2sFloor : w2sWall;
   const s2w      = (view === "floor") ? s2wFloor : s2wWall;
   const project  = (view === "floor") ? anchorPlan : anchorWall;
@@ -604,29 +748,6 @@ function drawDrawingPreview(view) {
         ctx.setLineDash([3, 3]);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-    }
-  }
-
-  if (mouse.alt) {
-    const tgt = findMergeTarget(view, mouse.sx, mouse.sy);
-    if (tgt) {
-      const E = tgt.cable;
-      const a = anchors.get(E.anchorIds[tgt.endpointIdx]);
-      if (visAnchor(a)) {
-        const p = a ? project(a) : null;
-        if (p) {
-          const [tx, ty] = toScreen(p[0], p[1]);
-          ctx.beginPath();
-          ctx.arc(tx, ty, 10, 0, Math.PI * 2);
-          ctx.strokeStyle = PALETTE.transit;
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.arc(tx, ty, 5, 0, Math.PI * 2);
-          ctx.fillStyle = PALETTE.transitFaint;
-          ctx.fill();
-        }
       }
     }
   }

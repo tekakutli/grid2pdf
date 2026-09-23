@@ -3722,10 +3722,154 @@ function drawDimensionChain(view) {
 
    Only one of these can be active per frame, chosen by the same
    reuse policy addDrawPoint uses, so what the user sees during
-   hover is exactly what the next click will commit. */
+   hover is exactly what the next click will commit.
+
+   Snap-candidate feedback
+   -----------------------
+   drawSnapCandidates shows every anchor the current click would
+   reuse, so the user can see what they are about to snap to before
+   committing.  Three tiers, from loudest to quietest:
+
+       primary in range     the anchor that would actually be picked
+                            — a solid teal ring with a filled centre,
+                            the same visual the earlier single-target
+                            merge-target preview used.
+       secondary in range   other candidates within the reuse
+                            threshold — thin teal rings.  They would
+                            be picked if the cursor moved closer.
+       out of range         candidates the cursor is near but not
+                            close enough to actually reuse — faint
+                            dashed grey rings.  "Move closer and this
+                            becomes selectable."
+
+   The candidate set is exactly what isReusableAnchor(a, mouse.alt,
+   view) accepts, minus the anchors already in the current drawing
+   (those are the ghost's own vertices, not fresh snap targets).
+   The in-range threshold matches ANCHOR_NEARBY_PX and
+   findMergeTarget's 14 px, so the visuals never lie about what a
+   click will do.
+
+   drawSnapCandidates runs whenever the cursor is over the view it
+   is called for — INCLUDING before the first point is placed, when
+   drawing.view is still null.  The earlier design gated the whole
+   preview on drawing.view === view, which meant no snap feedback
+   appeared until after the first click; that gate is now split,
+   with the ghost line still gated but the candidate feedback not.
+
+   The old single-target block that used findMergeTarget is gone —
+   drawSnapCandidates covers that case and shows the full candidate
+   set at once.  findMergeTarget itself is unchanged and still used
+   by addDrawPoint; only the preview stopped calling it. */
+
+/* Reuse thresholds, in SCREEN pixels.  SNAP_IN_RANGE_PX matches
+   ANCHOR_NEARBY_PX in pg_core and findMergeTarget's own 14; a click
+   at or under this distance will reuse the anchor.  SNAP_VISIBLE_PX
+   is the outer halo where a ring is still drawn but the click would
+   not reuse — the "almost, move closer" band. */
+const SNAP_IN_RANGE_PX = 14;
+const SNAP_VISIBLE_PX  = 26;
+
+function drawSnapCandidates(view) {
+  const project  = (view === "floor") ? anchorPlan : anchorWall;
+  const toScreen = (view === "floor") ? w2sFloor   : w2sWall;
+
+  const candidates = [];
+  for (const a of anchors.values()) {
+    if (view === "wall" && a.space === "wall-edge" && isSegHidden(a.segIdx))
+      continue;
+    if (!isReusableAnchor(a, mouse.alt, view)) continue;
+    if (drawing.anchorIds.indexOf(a.id) >= 0) continue;
+
+    const p = project(a);
+    if (!p) continue;
+    const [sx, sy] = toScreen(p[0], p[1]);
+    const d = Math.hypot(sx - mouse.sx, sy - mouse.sy);
+    if (d > SNAP_VISIBLE_PX) continue;
+
+    candidates.push({ sx, sy, d });
+  }
+  if (!candidates.length) return;
+
+  candidates.sort((x, y) => x.d - y.d);
+  const primary = candidates[0];
+
+  ctx.save();
+  ctx.lineCap = "round";
+
+  /* Secondary rings, drawn first so the primary overlays them. */
+  for (let i = candidates.length - 1; i >= 1; i--) {
+    const c = candidates[i];
+    const inRange = c.d <= SNAP_IN_RANGE_PX;
+    ctx.beginPath();
+    ctx.arc(c.sx, c.sy, 8, 0, Math.PI * 2);
+    if (inRange) {
+      ctx.strokeStyle = PALETTE.transitSoft;
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = PALETTE.inkFaint;
+      ctx.lineWidth = 1.0;
+      ctx.setLineDash([2, 2]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* Primary ring — solid teal when in range, dashed grey when the
+     cursor is still outside the reuse threshold.  The centre dot
+     only appears when the click would actually reuse this anchor,
+     so "does clicking do anything" is answerable at a glance. */
+  const inRange = primary.d <= SNAP_IN_RANGE_PX;
+  const ringR   = inRange ? 12 : 10;
+  ctx.beginPath();
+  ctx.arc(primary.sx, primary.sy, ringR, 0, Math.PI * 2);
+  if (inRange) {
+    ctx.strokeStyle = PALETTE.transit;
+    ctx.lineWidth = 2.6;
+    ctx.setLineDash([]);
+  } else {
+    ctx.strokeStyle = PALETTE.inkSoft;
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([3, 3]);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (inRange) {
+    ctx.beginPath();
+    ctx.arc(primary.sx, primary.sy, 5, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE.transitFaint;
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
 
 function drawDrawingPreview(view) {
-  if (!drawing || drawing.view !== view) return;
+  if (!drawing) return;
+
+  /* Snap-candidate feedback fires whenever the cursor is over the
+     view this call is for, regardless of whether the drawing owns
+     that view yet.  Two cases:
+
+       drawing.view === null   no first point placed; the cursor
+                               could go to either band, so whichever
+                               band the cursor is over shows its
+                               candidates.
+       drawing.view === view   drawing locked to this band; show its
+                               candidates.
+
+     Any other combination means the drawing is committed to the
+     other band and the cursor is here — a click would be rejected
+     by addDrawPoint, so no rings are shown. */
+  const candidateViewOK =
+    (drawing.view === null) || (drawing.view === view);
+  if (candidateViewOK && mouse.inside && mouse.view === view) {
+    drawSnapCandidates(view);
+  }
+
+  if (drawing.view !== view) return;
+
   const toScreen = (view === "floor") ? w2sFloor : w2sWall;
   const s2w      = (view === "floor") ? s2wFloor : s2wWall;
   const project  = (view === "floor") ? anchorPlan : anchorWall;
@@ -3910,29 +4054,6 @@ function drawDrawingPreview(view) {
         ctx.setLineDash([3, 3]);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-    }
-  }
-
-  if (mouse.alt) {
-    const tgt = findMergeTarget(view, mouse.sx, mouse.sy);
-    if (tgt) {
-      const E = tgt.cable;
-      const a = anchors.get(E.anchorIds[tgt.endpointIdx]);
-      if (visAnchor(a)) {
-        const p = a ? project(a) : null;
-        if (p) {
-          const [tx, ty] = toScreen(p[0], p[1]);
-          ctx.beginPath();
-          ctx.arc(tx, ty, 10, 0, Math.PI * 2);
-          ctx.strokeStyle = PALETTE.transit;
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.arc(tx, ty, 5, 0, Math.PI * 2);
-          ctx.fillStyle = PALETTE.transitFaint;
-          ctx.fill();
-        }
       }
     }
   }
@@ -12181,22 +12302,6 @@ window.addEventListener("keydown", (e) => {
 });
 
 /* ==========================================================================
-   LOCALISATION
-   ==========================================================================
-
-   Every user-facing string this module writes — the render's captions,
-   the preview page's chrome, the status flash messages — comes from
-   T() in pg_i18n.py.  This module carries no LANG, no TRANSLATIONS,
-   and no T of its own: a fork that wants a different language
-   switches LANG in pg_i18n.py and translates the corresponding table
-   entry, and the export follows automatically.
-
-   See pg_i18n.py's module docstring for the pattern: keys with
-   arguments are functions of their arguments, keys without are
-   plain strings, and any key a partial translation table is missing
-   falls back to English. */
-
-/* ==========================================================================
    PRINT-FRIENDLY TEXTURES
    ========================================================================== */
 
@@ -12254,21 +12359,6 @@ function _pat(ctx, kind) {
 
 window.filterCollinearVerticesInStrip = false;
 
-/* Collinear-anchor filter.
-
-   Drops the middle anchor of any three consecutive wall-edge anchors
-   that sit on the same wall segment, at the same height, and on a
-   straight line through their two neighbours.
-
-   The same-segment check matters.  The room model can represent one
-   physical wall as several segments — a column flush against it, an
-   opening that punches through, a step riser that splits the stretch —
-   and the boundary between those segments is a real vertex a cable can
-   cross.  A cable running along a wall past the point where the wall
-   was split must still show the vertex there.  Keeping the vertex also
-   keeps the pill's two side-distance readings attached to the wall
-   they were measured along; collapsing across a segment boundary would
-   measure both distances against one wall and print the wrong numbers. */
 function _collapseStripCollinear(orderedIds) {
   if (!window.filterCollinearVerticesInStrip) return orderedIds.slice();
   if (orderedIds.length < 3) return orderedIds.slice();
@@ -12311,8 +12401,6 @@ function _collapseStripCollinear(orderedIds) {
 /* ==========================================================================
    CABLE RUN EXPORT
    ========================================================================== */
-
-/* ---- Linearization ---- */
 
 function computeAnchor3D(a) {
   if (!a) return null;
@@ -12487,7 +12575,20 @@ function segmentKind(aid, bid, parts) {
   return null;
 }
 
-function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks, pillNameOf) {
+function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks,
+                            labelPlacement, stripOffsetX, stripW,
+                            stripTotalMM) {
+  const pillNameOf = (labelPlacement && labelPlacement.pillNameOf)
+                     ? labelPlacement.pillNameOf
+                     : new Map();
+
+  const _r2 = (v) => Math.round(v * 100) / 100;
+  const _r3 = (v) => Math.round(v * 1000) / 1000;
+
+  const pxPerMm = (stripW > 0 && stripTotalMM > 0)
+    ? stripW / stripTotalMM
+    : 0;
+
   const parts = allCables().filter(c => trueCableIdOf(c) === tcId);
 
   const walls = [];
@@ -12580,6 +12681,90 @@ function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks, pillNameOf) {
 
   const totalLen = totalCableLength(orderedIds);
 
+  const pills = [];
+  const pillRows = [];
+  if (labelPlacement && Array.isArray(labelPlacement.placed)) {
+    const areaX0 = labelPlacement.areaX0;
+    const areaX1 = labelPlacement.areaX1;
+    const usableWidth =
+      (typeof areaX0 === "number" && typeof areaX1 === "number")
+        ? areaX1 - areaX0
+        : null;
+
+    for (const it of labelPlacement.placed) {
+      const members = Array.isArray(it.members) ? it.members.slice() : [];
+      const memberIndices = members
+        .map(id => orderedIds.indexOf(id))
+        .filter(i => i >= 0);
+
+      pills.push({
+        name: it.name || null,
+        track: it.track,
+
+        x_logical:           _r2(it.pillCenterX),
+        anchorX_logical:     _r2(it.anchorCx),
+        displacement_logical:
+          _r2(Math.abs(it.pillCenterX - it.anchorCx)),
+
+        x_mm: (pxPerMm > 0 && typeof stripOffsetX === "number")
+          ? _r2((it.pillCenterX - stripOffsetX) / pxPerMm) : null,
+        anchorX_mm: (pxPerMm > 0 && typeof stripOffsetX === "number")
+          ? _r2((it.anchorCx - stripOffsetX) / pxPerMm) : null,
+
+        width_logical:  _r2(it.w),
+        height_logical: _r2(it.h),
+
+        memberAnchorIds:     members,
+        memberAnchorIndices: memberIndices,
+
+        channelYRel: (typeof it.channelYRel === "number")
+                     ? _r2(it.channelYRel) : null,
+        offsetA:  _r2(it.offsetA  || 0),
+        diveMode: it.diveMode || 0,
+        bevel0:   _r2(it.bevel0 || 0),
+        bevel1:   _r2(it.bevel1 || 0),
+        jog0:     _r2(it.jog0   || 0),
+        jog1:     _r2(it.jog1   || 0),
+        startJog: _r2(it.startJog || 0),
+
+        leaderStyle: (it.leaderStyle === 1) ? "dashed" : "solid",
+
+        lines: it.lines.map(l => ({
+          left:  l.left  || "",
+          right: l.right || null,
+        })),
+      });
+    }
+
+    const trackMap = new Map();
+    for (const it of labelPlacement.placed) {
+      if (!trackMap.has(it.track)) trackMap.set(it.track, []);
+      trackMap.get(it.track).push(it);
+    }
+    const sortedTracks = Array.from(trackMap.keys()).sort((a, b) => a - b);
+    for (const t of sortedTracks) {
+      const row = trackMap.get(t);
+      let xMin = Infinity, xMax = -Infinity;
+      for (const it of row) {
+        const left  = it.pillCenterX - it.w / 2;
+        const right = it.pillCenterX + it.w / 2;
+        if (left  < xMin) xMin = left;
+        if (right > xMax) xMax = right;
+      }
+      const span = xMax - xMin;
+      pillRows.push({
+        track:         t,
+        count:         row.length,
+        xMin_logical:  _r2(xMin),
+        xMax_logical:  _r2(xMax),
+        span_logical:  _r2(span),
+        fillRatio: (usableWidth && usableWidth > 0)
+          ? _r3(span / usableWidth) : null,
+        pillNames: row.map(it => it.name || "(anon)"),
+      });
+    }
+  }
+
   return {
     schemaVersion:  6,
     cableId:        tcId,
@@ -12588,8 +12773,14 @@ function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks, pillNameOf) {
     totalLength_mm: totalLen,
     wallLength_mm:  wallLen,
     floorLength_mm: floorLen,
+
+    stripScale_px_per_mm: _r3(pxPerMm),
+
     walls:          walls,
     anchors:        anchorsMeta,
+
+    pills:          pills,
+    pillRows:       pillRows,
   };
 }
 
@@ -12918,6 +13109,14 @@ function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
 const SEG_MIN_SEP  = 6.0;
 const SEG_MIN_LEN  = 5.0;
 
+/* Minimum clearance a leader segment must keep from a foreign pill
+   box.  Equal to SEG_MIN_SEP: "too close to matter" is the same
+   threshold for a segment near another segment and for a segment
+   near a pill outline.  Two stroke widths plus a hair of air is
+   enough for a reader to see that the two marks are separate; less
+   than that and they read as touching. */
+const PILL_PROX = SEG_MIN_SEP;
+
 const PARALLEL_TOL = Math.PI / 12;
 
 function _pointSegDist(px, py, ax, ay, bx, by) {
@@ -12960,6 +13159,12 @@ function _pathSegments(path, pathIdx, minLen) {
   return out;
 }
 
+function _angleDiff(a, b) {
+  let d = Math.abs(a - b) % Math.PI;
+  if (d > Math.PI / 2) d = Math.PI - d;
+  return d;
+}
+
 function _findSegmentConflicts(segs, minSep) {
   const out = [];
   for (let i = 0; i < segs.length; i++) {
@@ -12967,7 +13172,6 @@ function _findSegmentConflicts(segs, minSep) {
     for (let j = i + 1; j < segs.length; j++) {
       const B = segs[j];
       if (A.pathIdx === B.pathIdx) continue;
-      if (A.kind === "horiz" && B.kind === "horiz") continue;
       if (A.maxX + minSep < B.minX) continue;
       if (B.maxX + minSep < A.minX) continue;
       if (A.maxY + minSep < B.minY) continue;
@@ -12980,100 +13184,132 @@ function _findSegmentConflicts(segs, minSep) {
   return out;
 }
 
-/* ---- Style conflict detection ----
-
-   A style conflict is two leaders whose rendered polylines come
-   within STYLE_PROX pixels of each other *while running parallel*.
-   Crossings are excluded: two leaders that merely cross are
-   unambiguously distinguishable and need no alternation.
-
-   Two segments count as parallel-close when all of:
-
-     • their angle difference is under STYLE_ANGLE_TOL (30°);
-     • their minimum distance is under STYLE_PROX (10 px);
-     • their projection overlap along the common direction is at
-       least STYLE_MIN_OVERLAP (12 px).
-
-   The projection-overlap filter is what rejects leaders that only
-   converge at a point — two cables that share a wall anchor and
-   diverge immediately touch near the anchor but do not run parallel,
-   so alternation would not help and should not apply.  An earlier
-   revision used an abstract L-shape per leader and a single
-   CONFLICT_DIST on each leg, which fired on any pair of anchors
-   within 14 px in x regardless of how briefly they were close.
-
-   The graph is built from the FINAL leader polylines — offsets, dive
-   modes, bevels and jogs included — because it must see exactly what
-   the renderer will draw.  Building it from the default mode-0 shapes
-   left it stale as soon as the optimiser moved a leader: a switch to
-   dive mode 2 deletes the near-anchor vertical leg and inserts a new
-   horizontal leg at anchorY, so any conflict edge justified by the
-   abandoned shape is spurious, and a leader whose only partner was
-   such an edge comes out dashed while looking completely isolated. */
-
-const STYLE_ANGLE_TOL   = Math.PI / 6;
-const STYLE_PROX        = 10.0;
-const STYLE_MIN_OVERLAP = 12.0;
-
-function _segProjectionOverlap(A, B) {
-  const lenA = Math.hypot(A.bx - A.ax, A.by - A.ay);
-  const lenB = Math.hypot(B.bx - B.ax, B.by - B.ay);
-  if (lenA < 1e-6 || lenB < 1e-6) return 0;
-  let ux = (A.bx - A.ax) / lenA + (B.bx - B.ax) / lenB;
-  let uy = (A.by - A.ay) / lenA + (B.by - B.ay) / lenB;
-  const dLen = Math.hypot(ux, uy);
-  if (dLen < 1e-6) return 0;
-  ux /= dLen; uy /= dLen;
-  const a0 = A.ax * ux + A.ay * uy;
-  const a1 = A.bx * ux + A.by * uy;
-  const b0 = B.ax * ux + B.ay * uy;
-  const b1 = B.bx * ux + B.by * uy;
-  const aLo = Math.min(a0, a1), aHi = Math.max(a0, a1);
-  const bLo = Math.min(b0, b1), bHi = Math.max(b0, b1);
-  return Math.max(0, Math.min(aHi, bHi) - Math.max(aLo, bLo));
+function _segBoxOverlap(s, box) {
+  const x0 = s.ax, y0 = s.ay;
+  const dx = s.bx - x0, dy = s.by - y0;
+  let t0 = 0, t1 = 1;
+  const clip = (p, q) => {
+    if (Math.abs(p) < 1e-9) return q >= 0;
+    const r = q / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+    else       { if (r < t0) return false; if (r < t1) t1 = r; }
+    return true;
+  };
+  if (!clip(-dx, x0 - box.qL)) return 0;
+  if (!clip( dx, box.qR - x0)) return 0;
+  if (!clip(-dy, y0 - box.qT)) return 0;
+  if (!clip( dy, box.qB - y0)) return 0;
+  return Math.max(0, t1 - t0);
 }
 
-function _buildStyleConflictGraph(placed, stripH, topPad, trackOffsets) {
-  const paths = placed.map(it => {
+/* ==========================================================================
+   LAYOUT SNAPSHOT — one build per candidate
+   ========================================================================== */
+
+function _buildLayout(placed, stripH, topPad, trackOffsets) {
+  const n = placed.length;
+  const paths = new Array(n);
+  const segs  = new Array(n);
+  const boxes = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const it = placed[i];
     const base = _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets);
     const bev  = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
-    return _applyJogsToPath(bev, it);
-  });
-  const segsByPath = paths.map((path, i) => _pathSegments(path, i, 2.0));
-
-  const adj = new Map();
-  for (const it of placed) adj.set(it, new Set());
-
-  for (let i = 0; i < segsByPath.length; i++) {
-    for (let k = 0; k < segsByPath[i].length; k++) {
-      const A = segsByPath[i][k];
-      for (let j = i + 1; j < segsByPath.length; j++) {
-        for (let l = 0; l < segsByPath[j].length; l++) {
-          const B = segsByPath[j][l];
-          if (_angleDiff(A.angle, B.angle) > STYLE_ANGLE_TOL) continue;
-          if (A.maxX + STYLE_PROX < B.minX) continue;
-          if (B.maxX + STYLE_PROX < A.minX) continue;
-          if (A.maxY + STYLE_PROX < B.minY) continue;
-          if (B.maxY + STYLE_PROX < A.minY) continue;
-          const d = _segSegDist(A.ax, A.ay, A.bx, A.by,
-                                B.ax, B.ay, B.bx, B.by);
-          if (d >= STYLE_PROX) continue;
-          if (_segProjectionOverlap(A, B) < STYLE_MIN_OVERLAP) continue;
-          adj.get(placed[i]).add(placed[j]);
-          adj.get(placed[j]).add(placed[i]);
-        }
-      }
-    }
+    const p    = _applyJogsToPath(bev, it);
+    paths[i] = p;
+    segs[i]  = _pathSegments(p, i, 1.0);
+    const qT = stripH + topPad + trackOffsets[it.track];
+    boxes[i] = {
+      qL: it.pillCenterX - it.w / 2,
+      qR: it.pillCenterX + it.w / 2,
+      qT,
+      qB: qT + it.h,
+    };
   }
-  return adj;
+  return { paths, segs, boxes };
 }
 
-/* ---- Wall-section boundary collision ----
+/* Small helper: the PILL_PROX-expanded box, or the box itself if
+   PILL_PROX is zero.  Called once per (segment, foreign-pill) pair
+   in the hot loops, so it does the arithmetic inline. */
+function _expandBox(box, prox) {
+  return {
+    qL: box.qL - prox,
+    qR: box.qR + prox,
+    qT: box.qT - prox,
+    qB: box.qB + prox,
+  };
+}
 
-   Vertical boundaries between wall chunks.  Same shape as the wall-edge
-   penalty, but mirrored: the leader must be near-vertical for the check
-   to apply, and the boundary is a vertical line rather than a horizontal
-   one. */
+/* Count all conflicts of one leader (index idx) against the layout.
+   Foreign pill boxes are expanded by PILL_PROX before the overlap
+   test, so a segment running within PILL_PROX of a pill edge counts
+   as a conflict even when it does not intersect the box. */
+function _countConflictsAt(idx, layout) {
+  const selfSegs = layout.segs[idx];
+  let n = 0;
+  for (let j = 0; j < layout.segs.length; j++) {
+    if (j === idx) continue;
+    const otherSegs = layout.segs[j];
+    for (let a = 0; a < selfSegs.length; a++) {
+      const sa = selfSegs[a];
+      for (let b = 0; b < otherSegs.length; b++) {
+        const sb = otherSegs[b];
+        if (sa.maxX + SEG_MIN_SEP < sb.minX) continue;
+        if (sb.maxX + SEG_MIN_SEP < sa.minX) continue;
+        if (sa.maxY + SEG_MIN_SEP < sb.minY) continue;
+        if (sb.maxY + SEG_MIN_SEP < sa.minY) continue;
+        const d = _segSegDist(sa.ax, sa.ay, sa.bx, sa.by,
+                              sb.ax, sb.ay, sb.bx, sb.by);
+        if (d < SEG_MIN_SEP) n++;
+      }
+    }
+    const expanded = _expandBox(layout.boxes[j], PILL_PROX);
+    for (const s of selfSegs) {
+      if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
+      if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
+      if (_segBoxOverlap(s, expanded) > 0) n++;
+    }
+  }
+  return n;
+}
+
+function _leaderHasConflictAt(idx, layout) {
+  const selfSegs = layout.segs[idx];
+  for (let j = 0; j < layout.segs.length; j++) {
+    if (j === idx) continue;
+    const otherSegs = layout.segs[j];
+    for (const sa of selfSegs) {
+      for (const sb of otherSegs) {
+        if (sa.maxX + SEG_MIN_SEP < sb.minX) continue;
+        if (sb.maxX + SEG_MIN_SEP < sa.minX) continue;
+        if (sa.maxY + SEG_MIN_SEP < sb.minY) continue;
+        if (sb.maxY + SEG_MIN_SEP < sa.minY) continue;
+        const d = _segSegDist(sa.ax, sa.ay, sa.bx, sa.by,
+                              sb.ax, sb.ay, sb.bx, sb.by);
+        if (d < SEG_MIN_SEP) return true;
+      }
+    }
+    const expanded = _expandBox(layout.boxes[j], PILL_PROX);
+    for (const s of selfSegs) {
+      if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
+      if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
+      if (_segBoxOverlap(s, expanded) > 0) return true;
+    }
+  }
+  return false;
+}
+
+function _conflictedLeaderIndices(layout) {
+  const s = new Set();
+  const n = layout.segs.length;
+  for (let i = 0; i < n; i++) {
+    if (_leaderHasConflictAt(i, layout)) s.add(i);
+  }
+  return s;
+}
+
+/* ---- Wall-section boundary collision ---- */
 
 function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
   let count = 0, depth = 0;
@@ -13114,26 +13350,9 @@ function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
   return { count, depth };
 }
 
-/* ---- Cable-wire collision ----
-
-   The strip's wire is a polyline that runs through every wall-edge
-   anchor of the cable, in order.  Leaders leave an anchor and dive into
-   the channel below the strip; a leader segment that comes within
-   SEG_MIN_SEP of a wire segment is penalised — except when the wire
-   segment belongs to the leader's own anchor (a leader always starts
-   *on* the wire at its anchor, so proximity there is expected).
-
-   Every contact is further classified as *parallel* or *crossing* by
-   comparing segment inclinations.  A parallel contact is weighted an
-   order of magnitude above a crossing. */
+/* ---- Cable-wire collision ---- */
 
 const WIRE_ANCHOR_TRIM = 8.0;
-
-function _angleDiff(a, b) {
-  let d = Math.abs(a - b) % Math.PI;
-  if (d > Math.PI / 2) d = Math.PI - d;
-  return d;
-}
 
 function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
   let count = 0, depth = 0;
@@ -13179,26 +13398,7 @@ function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
   return { count, depth, parCount, parDepth };
 }
 
-/* ---- Wall-edge collision ----
-
-   Every drawn wall chunk in the strip is a rectangle; its top edge is
-   z_hi mapped to strip y, its bottom edge is z_lo mapped to strip y.
-   The strip also has two outer rules — the ceiling dashed line at y = 0
-   and the floor dashed line at y = stripH — that bound the whole band.
-
-   The criterion is the MAXIMUM distance from the leader to the edge over
-   the x-overlap, not the average.  A perpendicular-ish crossing enters
-   and leaves the edge's neighbourhood within the overlap, so its max
-   distance far exceeds SEG_MIN_SEP and it is ignored.  A run-along
-   leader — even one that starts *on* the edge at its own anchor, which
-   is exactly what dive mode 2 produces for a floor-level anchor — has
-   max distance close to zero and is penalised.
-
-   This deliberately has no "anchor trim" exclusion.  An earlier
-   revision skipped any edge within 8 px of the leader's anchor, which
-   silently swallowed the case we most care about: an anchor at v = 0
-   sits exactly on a wall's z_lo edge, and a mode-2 horizontal leg
-   leaves the anchor along that very edge. */
+/* ---- Wall-edge collision ---- */
 
 function _wallEdgeOverlapPenalty(leaderSegs, wallEdges) {
   let count = 0, depth = 0;
@@ -13241,7 +13441,7 @@ function _wallEdgeOverlapPenalty(leaderSegs, wallEdges) {
   return { count, depth };
 }
 
-/* ---- Corner features and exclusion zones ---- */
+/* ---- Corner features ---- */
 
 const CORNER_MIN_DIST = 24.0;
 
@@ -13252,7 +13452,8 @@ function _cornerFeature(it, placed, stripH, topPad, trackOffsets, which) {
   const basePath = computeLeaderPath(
     it.anchorCx, anchorY, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
+    it.startJog || 0);
 
   if (basePath.length < 3) {
     const p = basePath[0] || [0, 0];
@@ -13304,6 +13505,63 @@ function _cornerDist(fA, fB) {
                      fB.x0, fB.y0, fB.x1, fB.y1);
 }
 
+/* ---- Style conflict detection ---- */
+
+const STYLE_ANGLE_TOL   = Math.PI / 6;
+const STYLE_PROX        = 10.0;
+const STYLE_MIN_OVERLAP = 12.0;
+
+function _segProjectionOverlap(A, B) {
+  const lenA = Math.hypot(A.bx - A.ax, A.by - A.ay);
+  const lenB = Math.hypot(B.bx - B.ax, B.by - B.ay);
+  if (lenA < 1e-6 || lenB < 1e-6) return 0;
+  let ux = (A.bx - A.ax) / lenA + (B.bx - B.ax) / lenB;
+  let uy = (A.by - A.ay) / lenA + (B.by - B.ay) / lenB;
+  const dLen = Math.hypot(ux, uy);
+  if (dLen < 1e-6) return 0;
+  ux /= dLen; uy /= dLen;
+  const a0 = A.ax * ux + A.ay * uy;
+  const a1 = A.bx * ux + A.by * uy;
+  const b0 = B.ax * ux + B.ay * uy;
+  const b1 = B.bx * ux + B.by * uy;
+  const aLo = Math.min(a0, a1), aHi = Math.max(a0, a1);
+  const bLo = Math.min(b0, b1), bHi = Math.max(b0, b1);
+  return Math.max(0, Math.min(aHi, bHi) - Math.max(aLo, bLo));
+}
+
+function _buildStyleConflictGraph(placed, stripH, topPad, trackOffsets) {
+  const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+  const segsByPath = layout.segs;
+
+  const adj = new Map();
+  for (const it of placed) adj.set(it, new Set());
+
+  for (let i = 0; i < segsByPath.length; i++) {
+    for (let k = 0; k < segsByPath[i].length; k++) {
+      const A = segsByPath[i][k];
+      if (A.len < 2.0) continue;
+      for (let j = i + 1; j < segsByPath.length; j++) {
+        for (let l = 0; l < segsByPath[j].length; l++) {
+          const B = segsByPath[j][l];
+          if (B.len < 2.0) continue;
+          if (_angleDiff(A.angle, B.angle) > STYLE_ANGLE_TOL) continue;
+          if (A.maxX + STYLE_PROX < B.minX) continue;
+          if (B.maxX + STYLE_PROX < A.minX) continue;
+          if (A.maxY + STYLE_PROX < B.minY) continue;
+          if (B.maxY + STYLE_PROX < A.minY) continue;
+          const d = _segSegDist(A.ax, A.ay, A.bx, A.by,
+                                B.ax, B.ay, B.bx, B.by);
+          if (d >= STYLE_PROX) continue;
+          if (_segProjectionOverlap(A, B) < STYLE_MIN_OVERLAP) continue;
+          adj.get(placed[i]).add(placed[j]);
+          adj.get(placed[j]).add(placed[i]);
+        }
+      }
+    }
+  }
+  return adj;
+}
+
 /* ---- Leader geometry optimiser ---- */
 
 const BEVEL_STEP      = 3.0;
@@ -13312,56 +13570,191 @@ const BEVEL_MIN_APPLY = 6.0;
 const JOG_STEP        = 3.0;
 const JOG_MAX         = 24.0;
 const JOG_MIN_APPLY   = 6.0;
-const OPT_MAX_PASSES  = 30;
+const OPT_MAX_PASSES  = 8;
 
+/* ==========================================================================
+   CHANNEL-TO-PILL TAIL
+   ==========================================================================
+
+   The tail is the leader's descent from the channel band (y = chanY)
+   down to the leader's own pill top edge (y = pillTopY), always
+   ENDING at (pillX, pillTopY).
+
+   Blockers and bands
+   ------------------
+   A blocker is a foreign pill whose x-range contains pillX (within
+   EPS slack).  Bands are the blockers merged along y when their gap
+   is at most 2*M, so consecutive blockers behave as one.
+
+   The walk
+   --------
+   Start at (pillX, chanY).  For each band, in ascending y order:
+
+     • descend at pillX from curY to entryY  (entryY = band.qT - M);
+     • jog at entryY to the chosen detourX;
+     • descend at detourX to exitY           (exitY = band.qB + M);
+     • jog back at exitY to pillX.
+
+   After the last band, descend at pillX to pillTopY.
+
+   Both entry and exit are clamped to [chanY, pillTopY], and a band
+   whose clamp collapses is skipped entirely.  This is what keeps the
+   walk from producing up-down-up shapes when a band straddles either
+   endpoint.
+
+   Detour column
+   -------------
+   For a band, the candidate edges are leftX = band.qL - M and
+   rightX = band.qR + M.  The nearer one is tried first; if either
+   fails the three clearance tests below, the search walks outward in
+   6-px steps from the last tried edge.  The three tests:
+
+     • vClear(detourX, entryY, exitY)      — the descent;
+     • hClear(entryY, pillX, detourX)      — the top jog;
+     • hClear(exitY,  pillX, detourX)      — the bottom jog.
+
+   If no candidate within the walk passes all three, the band falls
+   back to the preferred edge regardless. */
 function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
                               stripBottom, topPad, trackOffsets) {
   const M = 4;
-  const out = [];
-  const blockers = [];
+  const EPS = 2;
+
+  /* Foreign pill boxes that overlap the tail's own y-range. */
+  const boxes = [];
   for (const Q of placed) {
     if (Q === self) continue;
-    const qL = Q.pillCenterX - Q.w / 2;
-    const qR = Q.pillCenterX + Q.w / 2;
     const qT = stripBottom + topPad + trackOffsets[Q.track];
     const qB = qT + Q.h;
-    if (pillX > qL && pillX < qR && qB > chanY && qT < pillTopY) {
-      blockers.push({ qL, qR, qT, qB });
+    if (qB <= chanY) continue;
+    if (qT >= pillTopY) continue;
+    boxes.push({
+      qL: Q.pillCenterX - Q.w / 2,
+      qR: Q.pillCenterX + Q.w / 2,
+      qT, qB,
+    });
+  }
+
+  /* Blockers: boxes whose x-range contains pillX. */
+  const blockers = [];
+  for (const b of boxes) {
+    if (pillX >= b.qL - EPS && pillX <= b.qR + EPS) blockers.push(b);
+  }
+  if (!blockers.length) return [[pillX, pillTopY]];
+
+  /* Sort by top edge, merge into bands. */
+  blockers.sort((a, b) => a.qT - b.qT);
+  const bands = [];
+  let cur = { qT: blockers[0].qT, qB: blockers[0].qB,
+              qL: blockers[0].qL, qR: blockers[0].qR };
+  for (let i = 1; i < blockers.length; i++) {
+    const b = blockers[i];
+    if (b.qT <= cur.qB + 2 * M) {
+      cur.qB = Math.max(cur.qB, b.qB);
+      cur.qL = Math.min(cur.qL, b.qL);
+      cur.qR = Math.max(cur.qR, b.qR);
+    } else {
+      bands.push(cur);
+      cur = { qT: b.qT, qB: b.qB, qL: b.qL, qR: b.qR };
     }
   }
-  blockers.sort((a, b) => a.qT - b.qT);
+  bands.push(cur);
 
+  /* A horizontal at y from xa to xb is clear if no box overlaps
+     both its x-span and its y-position (within EPS). */
+  const hClear = (y, xa, xb) => {
+    const lo = Math.min(xa, xb), hi = Math.max(xa, xb);
+    for (const b of boxes) {
+      if (b.qT - EPS > y || b.qB + EPS < y) continue;
+      if (b.qR < lo || b.qL > hi) continue;
+      return false;
+    }
+    return true;
+  };
+
+  /* A vertical at x from ya to yb is clear if no box overlaps both
+     its x-position and its y-span (within EPS). */
+  const vClear = (x, ya, yb) => {
+    const lo = Math.min(ya, yb), hi = Math.max(ya, yb);
+    for (const b of boxes) {
+      if (b.qL - EPS > x || b.qR + EPS < x) continue;
+      if (b.qB <= lo || b.qT >= hi) continue;
+      return false;
+    }
+    return true;
+  };
+
+  const out = [];
   let curY = chanY;
-  for (const b of blockers) {
-    if (b.qT <= curY) continue;
-    const distL = pillX - b.qL;
-    const distR = b.qR - pillX;
-    const detourX = (distR < distL) ? (b.qR + M) : (b.qL - M);
-    out.push([pillX,   b.qT - M]);
-    out.push([detourX, b.qT - M]);
-    out.push([detourX, b.qB + M]);
-    out.push([pillX,   b.qB + M]);
-    curY = b.qB + M;
+
+  for (const band of bands) {
+    const entryY = Math.max(curY, band.qT - M);
+    const exitY  = Math.min(pillTopY, band.qB + M);
+    if (entryY >= exitY - 0.5) continue;
+
+    /* Descend at pillX from curY to entryY. */
+    if (entryY > curY + 0.5) {
+      out.push([pillX, entryY]);
+      curY = entryY;
+    }
+
+    /* Choose the detour column for this band. */
+    const leftX  = band.qL - M;
+    const rightX = band.qR + M;
+    const preferRight = (rightX - pillX) < (pillX - leftX);
+    const tryOrder = preferRight ? [rightX, leftX] : [leftX, rightX];
+
+    let detourX = null;
+    for (const base of tryOrder) {
+      const dir = base > pillX ? 1 : -1;
+      let probe = base;
+      for (let k = 0; k < 60; k++) {
+        if (vClear(probe, entryY, exitY) &&
+            hClear(entryY, pillX, probe) &&
+            hClear(exitY,  pillX, probe)) {
+          detourX = probe;
+          break;
+        }
+        probe += dir * 6;
+      }
+      if (detourX !== null) break;
+    }
+    if (detourX === null) {
+      detourX = preferRight ? rightX : leftX;
+    }
+
+    out.push([detourX, entryY]);
+    out.push([detourX, exitY]);
+    out.push([pillX,   exitY]);
+    curY = exitY;
   }
-  out.push([pillX, pillTopY]);
+
+  if (pillTopY > curY + 0.5) {
+    out.push([pillX, pillTopY]);
+  }
   return out;
 }
 
 function computeLeaderPath(anchorX, anchorY, offA, chanY, pillX, pillTopY,
                            self, placed, stripBottom, topPad, trackOffsets,
-                           diveMode) {
+                           diveMode, startJog) {
   const mode = diveMode || 0;
+  const sj   = startJog || 0;
+  const ax   = anchorX + sj;
   const path = [];
   path.push([anchorX, anchorY]);
+
   if (mode === 1) {
-    path.push([anchorX, chanY]);
-    path.push([pillX,   chanY]);
+    if (sj !== 0) path.push([ax, anchorY]);
+    path.push([ax, chanY]);
+    path.push([pillX, chanY]);
   } else if (mode === 2) {
     path.push([pillX, anchorY]);
     path.push([pillX, chanY]);
   } else {
-    path.push([anchorX + offA, chanY]);
-    path.push([pillX,          chanY]);
+    if (sj !== 0) path.push([ax, anchorY]);
+    path.push([ax + offA, chanY]);
+    path.push([pillX,     chanY]);
   }
 
   const tail = _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
@@ -13377,7 +13770,8 @@ function _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets) {
   return computeLeaderPath(
     it.anchorCx, anchorY, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
+    it.startJog || 0);
 }
 
 function _bevelPath(path, b0, b1) {
@@ -13446,12 +13840,44 @@ function _jogSegment(points, segIdx, shift) {
     .concat([M1, M2], points.slice(segIdx + 1));
 }
 
+/* ==========================================================================
+   JOG DIRECTION GUARD
+   ==========================================================================
+   A jog slides a vertical leg of the leader's polyline horizontally.
+   If the slide goes in the direction the leader is already travelling
+   (the direction of its own horizontal run — the sign of
+   pillCenterX minus anchorCx minus offsetA), the path continues
+   smoothly past the jog.  If the slide goes the other way, the path
+   reverses direction — the "bump" case.
+
+   jog0 targets the first VERTICAL segment of the polyline, not
+   literally segment index 0, so a start jog and a jog0 can coexist:
+   the start jog adds a horizontal segment at index 0, and jog0 walks
+   past it to the anchor leg. */
+
 function _applyJogsToPath(path, it) {
   let p = path;
-  if (it.jog0 && Math.abs(it.jog0) >= JOG_MIN_APPLY && p.length >= 2) {
-    p = _jogSegment(p, 0, it.jog0);
+
+  const anchorEndX = (it.anchorCx || 0) + (it.offsetA || 0);
+  const fwd = Math.sign((it.pillCenterX || 0) - anchorEndX);
+
+  const jogAllowed = (jog) => {
+    if (fwd === 0) return true;
+    if (jog === 0) return true;
+    return Math.sign(jog) === fwd;
+  };
+
+  if (it.jog0 && Math.abs(it.jog0) >= JOG_MIN_APPLY && p.length >= 2
+      && jogAllowed(it.jog0)) {
+    for (let i = 0; i < p.length - 1; i++) {
+      if (Math.abs(p[i][0] - p[i + 1][0]) < 0.5) {
+        p = _jogSegment(p, i, it.jog0);
+        break;
+      }
+    }
   }
-  if (it.jog1 && Math.abs(it.jog1) >= JOG_MIN_APPLY && p.length >= 2) {
+  if (it.jog1 && Math.abs(it.jog1) >= JOG_MIN_APPLY && p.length >= 2
+      && jogAllowed(it.jog1)) {
     p = _jogSegment(p, p.length - 2, it.jog1);
   }
   return p;
@@ -13492,12 +13918,35 @@ function _candidatesFor(cur, isBevel) {
 
 const DIVE_MODES = [0, 1, 2];
 
+const CHANNEL_Y_STEPS = [
+  -24, -16, -8, -4, 4, 8, 16, 24, 32, 40, -32, -40,
+];
+
+const OFFSET_A_STEPS = [-8, -2, 2, 8];
+
+/* Start-jog pool.  Values are absolute target positions for
+   it.startJog; the optimiser also tries 0 (the natural value when no
+   jog is needed).  The magnitudes are all at least 8 px so a
+   successful move is guaranteed to clear SEG_MIN_SEP = 6 from any
+   boundary the anchor sits on. */
+const START_JOG_STEPS = [-20, -14, -8, 8, 14, 20];
+
+/* ==========================================================================
+   LEADER GEOMETRY OPTIMISER
+   ==========================================================================
+   Six move families, all tried in one pass.  Each candidate move is
+   scored against the layout with the complete exhaustive tier list.
+   Only strictly-improving moves are accepted.
+
+   The pass loop skips leaders with no conflict at all — in a typical
+   19-pill layout that is 2/3 of them. */
 function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                                 boundaries, wireSegments, wallEdges) {
   for (const it of placed) {
     it.bevel0 = 0; it.bevel1 = 0;
     it.jog0   = 0; it.jog1   = 0;
     it.diveMode = 0;
+    it.startJog = 0;
   }
   if (placed.length < 2) return;
 
@@ -13505,72 +13954,131 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
   const wires = Array.isArray(wireSegments) ? wireSegments : [];
   const wes   = Array.isArray(wallEdges)    ? wallEdges    : [];
 
-  function buildPaths() {
-    return placed.map(it => {
-      const base = _buildLeaderPathRel(it, placed, stripH, topPad,
-                                        trackOffsets);
-      const bev  = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
-      return _applyJogsToPath(bev, it);
-    });
-  }
-
   function evaluate() {
-    const paths = buildPaths();
+    const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+    const pathSegs = layout.segs;
+    const boxes    = layout.boxes;
 
     const allSegs = [];
-    for (let i = 0; i < paths.length; i++) {
-      for (const s of _pathSegments(paths[i], i, SEG_MIN_LEN)) {
-        allSegs.push(s);
+    for (const segs of pathSegs) {
+      for (const s of segs) {
+        if (s.len >= SEG_MIN_LEN) allSegs.push(s);
       }
     }
 
-    /* --- tier 1: vertical-vertical overlaps (leader vs leader) --- */
+    /* --- tier 1: V-V and H-H parallel collinear pairs --- */
     let vvCount = 0, vvDepth = 0;
+    let hhCount = 0, hhDepth = 0;
     for (let i = 0; i < allSegs.length; i++) {
       const A = allSegs[i];
-      if (A.kind !== "vert") continue;
       for (let j = i + 1; j < allSegs.length; j++) {
         const B = allSegs[j];
-        if (B.kind !== "vert") continue;
         if (A.pathIdx === B.pathIdx) continue;
-        const dx = Math.abs(A.ax - B.ax);
-        if (dx >= SEG_MIN_SEP) continue;
-        const oy0 = Math.max(A.minY, B.minY);
-        const oy1 = Math.min(A.maxY, B.maxY);
-        if (oy1 <= oy0) continue;
-        vvCount++;
-        vvDepth += (SEG_MIN_SEP - dx);
+
+        if (A.kind === "vert" && B.kind === "vert") {
+          const dx = Math.abs(A.ax - B.ax);
+          if (dx >= SEG_MIN_SEP) continue;
+          const oy0 = Math.max(A.minY, B.minY);
+          const oy1 = Math.min(A.maxY, B.maxY);
+          if (oy1 <= oy0) continue;
+          vvCount++;
+          vvDepth += (SEG_MIN_SEP - dx);
+          continue;
+        }
+        if (A.kind === "horiz" && B.kind === "horiz") {
+          const dy = Math.abs(A.ay - B.ay);
+          if (dy >= SEG_MIN_SEP) continue;
+          const ox0 = Math.max(A.minX, B.minX);
+          const ox1 = Math.min(A.maxX, B.maxX);
+          if (ox1 <= ox0) continue;
+          hhCount++;
+          hhDepth += (SEG_MIN_SEP - dy);
+          continue;
+        }
       }
     }
 
-    /* --- tier 2: leader vs leader, any non-horizontal/non-horizontal pair --- */
-    let segCount = 0, segDepth = 0;
-    const segConflicts = _findSegmentConflicts(allSegs, SEG_MIN_SEP);
-    for (const c of segConflicts) {
-      const isVV = (c.a.kind === "vert" && c.b.kind === "vert");
-      if (isVV) continue;
-      segCount++;
-      segDepth += (SEG_MIN_SEP - c.dist);
+    /* --- tier 2b: segment vs foreign pill AABB, expanded by
+       PILL_PROX so a segment running alongside a pill counts --- */
+    let pillCount = 0, pillDepth = 0;
+    for (let i = 0; i < pathSegs.length; i++) {
+      for (const s of pathSegs[i]) {
+        if (s.len < 1.0) continue;
+        for (let j = 0; j < boxes.length; j++) {
+          if (j === i) continue;
+          const box = boxes[j];
+          const expanded = {
+            qL: box.qL - PILL_PROX,
+            qR: box.qR + PILL_PROX,
+            qT: box.qT - PILL_PROX,
+            qB: box.qB + PILL_PROX,
+          };
+          if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
+          if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
+          const t = _segBoxOverlap(s, expanded);
+          if (t > 0) { pillCount++; pillDepth += t; }
+        }
+      }
     }
 
-    /* --- tier 2b: leader vs wall-section boundary --- */
-    const bPen = _boundaryOverlapPenalty(allSegs, bxs, stripH);
-    const bCount = bPen.count;
-    const bDepth = bPen.depth;
+    /* --- tier 2: every non-parallel-collinear segment pair --- */
+    let segCount = 0, segDepth = 0;
+    for (let i = 0; i < allSegs.length; i++) {
+      const A = allSegs[i];
+      for (let j = i + 1; j < allSegs.length; j++) {
+        const B = allSegs[j];
+        if (A.pathIdx === B.pathIdx) continue;
+        if (A.kind === "vert"  && B.kind === "vert")  continue;
+        if (A.kind === "horiz" && B.kind === "horiz") continue;
+        if (A.maxX + SEG_MIN_SEP < B.minX) continue;
+        if (B.maxX + SEG_MIN_SEP < A.minX) continue;
+        if (A.maxY + SEG_MIN_SEP < B.minY) continue;
+        if (B.maxY + SEG_MIN_SEP < A.minY) continue;
+        const d = _segSegDist(A.ax, A.ay, A.bx, A.by,
+                              B.ax, B.ay, B.bx, B.by);
+        if (d < SEG_MIN_SEP) { segCount++; segDepth += (SEG_MIN_SEP - d); }
+      }
+    }
 
-    /* --- tier 2c: leader vs cable wire (parallel vs crossing split) --- */
+    /* --- tier 3: boundary / wire / wall-edge --- */
+    const bPen = _boundaryOverlapPenalty(allSegs, bxs, stripH);
+    const bCount = bPen.count, bDepth = bPen.depth;
+
     const wPen = _wireOverlapPenalty(allSegs, placed, wires);
     const wireCount    = wPen.count;
     const wireDepth    = wPen.depth;
     const wireParCount = wPen.parCount;
     const wireParDepth = wPen.parDepth;
 
-    /* --- tier 2d: leader vs wall chunk edges (horizontal rules) --- */
     const ePen = _wallEdgeOverlapPenalty(allSegs, wes);
-    const weCount = ePen.count;
-    const weDepth = ePen.depth;
+    const weCount = ePen.count, weDepth = ePen.depth;
 
-    /* --- tier 3: corner-feature exclusion zones --- */
+    /* --- tier 3d: arrowhead regions vs foreign segments --- */
+    const HEAD_HALF = 5;
+    let headCount = 0, headDepth = 0;
+    for (let i = 0; i < placed.length; i++) {
+      const it = placed[i];
+      const anchorPt = [it.anchorCx, it.anchorCyRel];
+      const pillPt   = [it.pillCenterX,
+                        stripH + topPad + trackOffsets[it.track]];
+      for (const [hx, hy] of [anchorPt, pillPt]) {
+        const box = { qL: hx - HEAD_HALF, qR: hx + HEAD_HALF,
+                      qT: hy - HEAD_HALF, qB: hy + HEAD_HALF };
+        for (let j = 0; j < pathSegs.length; j++) {
+          if (j === i) continue;
+          for (const s of pathSegs[j]) {
+            if (s.maxX < box.qL || s.minX > box.qR) continue;
+            if (s.maxY < box.qT || s.minY > box.qB) continue;
+            if (_segBoxOverlap(s, box) > 0) {
+              headCount++;
+              headDepth += HEAD_HALF;
+            }
+          }
+        }
+      }
+    }
+
+    /* --- tier 4: corner features --- */
     const corners = [];
     for (let pi = 0; pi < placed.length; pi++) {
       const it = placed[pi];
@@ -13617,18 +14125,38 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
       }
     }
 
-    /* Boundary collisions, wire collisions and leader-leader segment
-       collisions sit at the base tier.  Wire-parallel overlaps AND
-       wall-edge overlaps both sit one tier above: in a black-and-white
-       render, running alongside either is genuinely harder to read
-       than a crossing, because the eye cannot disentangle the two
-       strokes.  Sliding the leader cannot fix such an overlap, so the
-       tier is high enough to force the optimiser to consider a
-       dive-mode switch instead. */
+    for (const cf of corners) {
+      const cfIsPt = (Math.abs(cf.x0 - cf.x1) < 0.5 &&
+                      Math.abs(cf.y0 - cf.y1) < 0.5);
+      for (let bi = 0; bi < boxes.length; bi++) {
+        if (bi === cf.pathIdx) continue;
+        const box = boxes[bi];
+        let hit = false;
+        if (cfIsPt) {
+          hit = cf.x0 >= box.qL && cf.x0 <= box.qR &&
+                cf.y0 >= box.qT && cf.y0 <= box.qB;
+        } else {
+          const s = { ax: cf.x0, ay: cf.y0, bx: cf.x1, by: cf.y1,
+                      minX: Math.min(cf.x0, cf.x1),
+                      maxX: Math.max(cf.x0, cf.x1),
+                      minY: Math.min(cf.y0, cf.y1),
+                      maxY: Math.max(cf.y0, cf.y1) };
+          hit = _segBoxOverlap(s, box) > 0;
+        }
+        if (hit) {
+          cornerCount++;
+          cornerDepth += CORNER_MIN_DIST;
+        }
+      }
+    }
+
     const score =
       vvCount      * 1e12 + vvDepth      * 1e11 +
+      hhCount      * 1e12 + hhDepth      * 1e11 +
+      pillCount    * 5e11 + pillDepth    * 5e10 +
       wireParCount * 1e11 + wireParDepth * 1e10 +
       weCount      * 1e11 + weDepth      * 1e10 +
+      headCount    * 1e10 + headDepth    * 1e9  +
       segCount     * 1e9  + segDepth     * 1e8  +
       bCount       * 1e9  + bDepth       * 1e8  +
       wireCount    * 1e9  + wireDepth    * 1e8  +
@@ -13641,9 +14169,15 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
   if (cur.score < 1) return;
 
   for (let pass = 0; pass < OPT_MAX_PASSES; pass++) {
+    const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+    const conflicted = _conflictedLeaderIndices(layout);
+
     let best = null;
 
-    for (const it of placed) {
+    for (let li = 0; li < placed.length; li++) {
+      if (!conflicted.has(li)) continue;
+      const it = placed[li];
+
       for (const field of ["bevel0", "bevel1", "jog0", "jog1"]) {
         const curVal  = it[field] || 0;
         const isBevel = field.startsWith("bevel");
@@ -13677,12 +14211,249 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           }
         }
       }
+
+      const curLane = (typeof it.channelYRel === "number")
+        ? it.channelYRel : 0;
+      for (const dY of CHANNEL_Y_STEPS) {
+        const newLane = curLane + dY;
+        if (newLane < 2) continue;
+        if (newLane >= topPad - 2) continue;
+
+        const saved = it.channelYRel;
+        it.channelYRel = newLane;
+        const test = evaluate();
+        it.channelYRel = saved;
+
+        if (test.score < cur.score - 0.5) {
+          if (!best || test.score < best.test.score) {
+            best = { it, field: 'channelYRel', newValue: newLane, test };
+          }
+        }
+      }
+
+      const curOff = it.offsetA || 0;
+      for (const dOff of OFFSET_A_STEPS) {
+        const newOff = curOff + dOff;
+        const saved = it.offsetA;
+        it.offsetA = newOff;
+        const test = evaluate();
+        it.offsetA = saved;
+
+        if (test.score < cur.score - 0.5) {
+          if (!best || test.score < best.test.score) {
+            best = { it, field: 'offsetA', newValue: newOff, test };
+          }
+        }
+      }
+
+      /* startJog: the candidate pool is absolute target values, plus
+         the natural 0.  Absolute rather than relative because the
+         jog either helps or it does not; there is no meaningful
+         "step" from one candidate to another. */
+      const curStart = it.startJog || 0;
+      const startCands = [0, ...START_JOG_STEPS];
+      for (const cand of startCands) {
+        if (cand === curStart) continue;
+        const saved = it.startJog;
+        it.startJog = cand;
+        const test = evaluate();
+        it.startJog = saved;
+
+        if (test.score < cur.score - 0.5) {
+          if (!best || test.score < best.test.score) {
+            best = { it, field: 'startJog', newValue: cand, test };
+          }
+        }
+      }
     }
 
     if (!best) break;
     best.it[best.field] = best.newValue;
     cur = best.test;
     if (cur.score < 1) break;
+  }
+}
+
+/* ==========================================================================
+   PILL PUSH PASS
+   ========================================================================== */
+
+function buildPathSegsFor(it, placed, stripH, topPad, trackOffsets) {
+  const chanY    = stripH + (it.channelYRel || 0);
+  const pillTopY = stripH + topPad + trackOffsets[it.track];
+  const base = computeLeaderPath(
+    it.anchorCx, it.anchorCyRel, it.offsetA || 0,
+    chanY, it.pillCenterX, pillTopY,
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
+    it.startJog || 0);
+  const path = _applyJogsToPath(
+    _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0), it);
+  return _pathSegments(path, -1, SEG_MIN_LEN);
+}
+
+/* Does the pill at index idx overlap, or come within PILL_PROX of,
+   any other pill in the same track? */
+function _pillHasSameTrackCollision(idx, placed) {
+  const me = placed[idx];
+  const myTrack = me.track;
+  const myL = me.pillCenterX - me.w / 2;
+  const myR = me.pillCenterX + me.w / 2;
+
+  for (let j = 0; j < placed.length; j++) {
+    if (j === idx) continue;
+    const other = placed[j];
+    if (other.track !== myTrack) continue;
+    const oL = other.pillCenterX - other.w / 2;
+    const oR = other.pillCenterX + other.w / 2;
+    if (myR + PILL_PROX > oL && oR + PILL_PROX > myL) return true;
+  }
+  return false;
+}
+
+/* One-time left-to-right separation per track. */
+function _separatePillsInTracks(placed) {
+  const byTrack = new Map();
+  for (let i = 0; i < placed.length; i++) {
+    const t = placed[i].track;
+    if (!byTrack.has(t)) byTrack.set(t, []);
+    byTrack.get(t).push(i);
+  }
+  for (const [, indices] of byTrack) {
+    indices.sort((a, b) =>
+      placed[a].pillCenterX - placed[b].pillCenterX);
+    for (let k = 1; k < indices.length; k++) {
+      const prev = placed[indices[k - 1]];
+      const cur  = placed[indices[k]];
+      const prevR = prev.pillCenterX + prev.w / 2;
+      const curL  = cur.pillCenterX - cur.w / 2;
+      const gap = curL - prevR;
+      if (gap < PILL_PROX) {
+        cur.pillCenterX += (PILL_PROX - gap);
+      }
+    }
+  }
+}
+
+function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
+  const PUSH = [];
+  for (let d = 4; d <= 32; d += 4) { PUSH.push(d); PUSH.push(-d); }
+
+  const MAX_ROUNDS = 3;
+
+  _separatePillsInTracks(placed);
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    let anyMoved = false;
+
+    for (let li = 0; li < placed.length; li++) {
+      const it = placed[li];
+      let layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+      const before = _countConflictsAt(li, layout);
+      if (before === 0) continue;
+
+      const origX = it.pillCenterX;
+      let bestX = origX, bestN = before;
+      for (const dX of PUSH) {
+        it.pillCenterX = origX + dX;
+        if (_pillHasSameTrackCollision(li, placed)) continue;
+        layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+        const n = _countConflictsAt(li, layout);
+        if (n < bestN) { bestN = n; bestX = origX + dX; }
+      }
+      it.pillCenterX = bestX;
+      if (bestX !== origX) anyMoved = true;
+
+      if (bestN > 0) {
+        const involved = new Set();
+        const selfSegs = layout.segs[li];
+
+        for (let j = 0; j < placed.length; j++) {
+          if (j === li) continue;
+          const otherSegs = layout.segs[j];
+          let cflt = false;
+
+          for (const sa of selfSegs) {
+            if (cflt) break;
+            for (const sb of otherSegs) {
+              if (sa.maxX + SEG_MIN_SEP < sb.minX) continue;
+              if (sb.maxX + SEG_MIN_SEP < sa.minX) continue;
+              if (sa.maxY + SEG_MIN_SEP < sb.minY) continue;
+              if (sb.maxY + SEG_MIN_SEP < sa.minY) continue;
+              const d = _segSegDist(sa.ax, sa.ay, sa.bx, sa.by,
+                                    sb.ax, sb.ay, sb.bx, sb.by);
+              if (d < SEG_MIN_SEP) { cflt = true; break; }
+            }
+          }
+
+          if (!cflt) {
+            const box = layout.boxes[j];
+            const expanded = {
+              qL: box.qL - PILL_PROX,
+              qR: box.qR + PILL_PROX,
+              qT: box.qT - PILL_PROX,
+              qB: box.qB + PILL_PROX,
+            };
+            for (const s of selfSegs) {
+              if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
+              if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
+              if (_segBoxOverlap(s, expanded) > 0) { cflt = true; break; }
+            }
+          }
+
+          if (cflt) involved.add(j);
+        }
+
+        for (const j of involved) {
+          const foreign = placed[j];
+          const fOrigX = foreign.pillCenterX;
+          let fBestX = fOrigX, fBestN = bestN;
+          for (const dX of PUSH) {
+            foreign.pillCenterX = fOrigX + dX;
+            if (_pillHasSameTrackCollision(j, placed)) continue;
+            layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+            const n = _countConflictsAt(li, layout);
+            if (n < fBestN) { fBestN = n; fBestX = fOrigX + dX; }
+          }
+          foreign.pillCenterX = fBestX;
+          if (fBestX !== fOrigX) { anyMoved = true; bestN = fBestN; }
+        }
+      }
+    }
+    if (!anyMoved) break;
+  }
+}
+
+/* ==========================================================================
+   POLISH LOOP
+   ========================================================================== */
+
+function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
+                            boundaries, wireSegments, wallEdges) {
+  const MAX_ROUNDS = 6;
+
+  const initialLayout = _buildLayout(placed, stripH, topPad, trackOffsets);
+  let prev = 0;
+  for (let i = 0; i < placed.length; i++) {
+    prev += _countConflictsAt(i, initialLayout);
+  }
+  prev = Math.floor(prev / 2);
+  if (prev === 0) return;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
+                           boundaries, wireSegments, wallEdges);
+    pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets);
+
+    const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
+    let now = 0;
+    for (let i = 0; i < placed.length; i++) {
+      now += _countConflictsAt(i, layout);
+    }
+    now = Math.floor(now / 2);
+
+    if (now >= prev) break;
+    prev = now;
+    if (now === 0) break;
   }
 }
 
@@ -13695,16 +14466,13 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
   const FONT  = "700 12px ui-monospace, monospace";
   const PAD_X = 6, PAD_Y = 4, LINE_H = 14;
   const TRACK_GAP_X   = 10;
-  const CROSS_MARGIN  = 5;
   const TRACK_V_GAP   = 8;
-  const TRACK_PENALTY = 24;
-  const DISP_CAP_SWAP = 40;
   const GROUP_TOL     = 8;
   const MAX_TRACKS    = 20;
   const AREA_X0 = stripAreaX0;
   const AREA_X1 = stripAreaX0 + stripAreaW;
 
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const COMPRESS_GAP = 20;
 
   const boundaries = [];
   const seenBx = new Set();
@@ -13813,17 +14581,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     return "W " + fmtCm(wDist) + " . E " + fmtCm(eDist);
   };
 
-  /* Build each pill as a list of { left, right } line descriptors.
-     left  — drawn left-aligned at rx + PAD_X (the "V<n>" name only
-             appears on the first line of a multi-vertex pill).
-     right — drawn right-aligned at rx + it.w - PAD_X.  Every "h <cm>"
-             height goes here so a stack of heights reads as a clean
-             right-aligned column and two merged vertices with
-             different heights stay visually distinct.
-     A line may have only left (the "W .. . E .." side distances),
-     only right (a subsequent vertex's height with no name), or both
-     (the first line of a pill, name on the left, height on the right). */
-
   const items = [];
   c.save();
   c.font = FONT;
@@ -13876,34 +14633,10 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
   }
   c.restore();
 
-  /* Collinear-pill filter (checkbox-gated).
-
-     A pill is suppressed only when all of the following hold:
-
-       1. its members form a contiguous run in the ordered cable,
-       2. the run has an anchor before it and an anchor after it,
-       3. the pill's position lies on the line through those two
-          neighbours' positions,
-       4. the wall segments the members sit on have comparable lengths
-          (ratio <= LEN_RATIO_MAX).
-
-     Point (3) is measured in *strip-mm*, not rendered pixels.  The
-     renderer may stretch a chunk shorter than MIN_CHUNK_PX up to the
-     minimum to keep it legible, which bends the px-space geometry of
-     a vertex that is really straight.  An earlier revision compared
-     wallAttachToU() coordinates, which are NATIVE strip-u and so
-     disagree with the on-screen direction whenever ch.mirror = true.
-     What we want is neither: it is the anchor's position along the
-     chunk's *visual* direction, in millimetres.
-
-     Anchors themselves are never removed from `orderedIds`, so the
-     dots at V2 / V5 / V11 / ... keep rendering.  Only the pill
-     descriptor is dropped. */
   if (window.filterCollinearVerticesInStrip && Array.isArray(orderedIds)) {
     const oi = new Map();
     orderedIds.forEach((id, i) => oi.set(id, i));
 
-    /* Visual strip position (u_mm, v_mm) of every wall-edge anchor. */
     const anchorMm = new Map();
     const segOfAid = new Map();
     {
@@ -13930,8 +14663,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       }
     }
 
-    const TOL_MM        = 2.0;   /* 2 mm of perpendicular slop */
-    const LEN_RATIO_MAX = 3.0;   /* "these walls are comparable" */
+    const TOL_MM        = 2.0;
+    const LEN_RATIO_MAX = 3.0;
     const kept = [];
 
     for (const it of items) {
@@ -13945,7 +14678,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       const lo = idxs[0];
       const hi = idxs[idxs.length - 1];
 
-      /* Contiguous interior run only. */
       if (hi - lo + 1 !== idxs.length) { kept.push(it); continue; }
       if (lo === 0 || hi === orderedIds.length - 1) {
         kept.push(it); continue;
@@ -13956,29 +14688,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       const cP = anchorMm.get(it.members[0]);
       if (!bP || !aP || !cP) { kept.push(it); continue; }
 
-      /* Asymmetric-wall guard — real corners only.
-
-         Keep a pill when its members sit on two walls that form a real
-         geometric corner in plan view *and* whose lengths differ enough
-         that the per-wall side-distance lines read very differently.  The
-         V8 case (W12 = 720 mm meets W13 = 160 mm, at right angles) is the
-         target: the two "W .. . E .." lines are measured along walls an
-         order of magnitude apart, so the pill is worth keeping even if
-         the vertex is straight in the strip.
-
-         The V16 case must NOT fire the guard: W7 = 170 mm and W1 = 3060 mm
-         share the endpoint (0, 3060) and run along the same line at x = 0.
-         They are two collinear segments of one physical wall, split by the
-         room model.  A cable passing their joint is running along a
-         straight wall; the pill carries no extra information and should be
-         filtered whenever it is strip-collinear.
-
-         The direction test below distinguishes the two.  Two wall
-         directions are "not collinear" when the absolute cosine of the
-         angle between them drops under CORNER_COS_MIN — i.e. the walls
-         diverge by more than about 10°.  Anti-parallel walls (cos ≈ 1) are
-         treated as collinear, because a wall reversed end-to-end is still
-         the same line. */
       const CORNER_COS_MIN = 0.985;
       const segs = new Set();
       for (const id of it.members) {
@@ -14040,6 +14749,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       trackOffsets: [], trackHeights: [],
       PAD_X, PAD_Y, LINE_H,
       pillNameOf,
+      areaX0: AREA_X0,
+      areaX1: AREA_X1,
     };
   }
 
@@ -14047,140 +14758,48 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
 
   const tracks = [];
 
-  const closestAllowedX = (target, minX, maxX, forbidden) => {
-    if (minX > maxX) return null;
-    const clipped = [];
-    for (const [xLo, xHi] of forbidden) {
-      const l = Math.max(xLo, minX);
-      const r = Math.min(xHi, maxX);
-      if (l <= r) clipped.push([l, r]);
-    }
-    clipped.sort((a, b) => a[0] - b[0]);
-    const merged = [];
-    for (const [xLo, xHi] of clipped) {
-      if (merged.length && xLo <= merged[merged.length - 1][1] + 0.01) {
-        merged[merged.length - 1][1] =
-          Math.max(merged[merged.length - 1][1], xHi);
-      } else {
-        merged.push([xLo, xHi]);
-      }
-    }
-    const allowed = [];
-    let cur = minX;
-    for (const [xLo, xHi] of merged) {
-      if (xLo > cur + 0.01) allowed.push([cur, xLo]);
-      cur = Math.max(cur, xHi);
-    }
-    if (cur < maxX - 0.01) allowed.push([cur, maxX]);
-    if (!allowed.length) return null;
-    let best = null, bestD = Infinity;
-    for (const [xLo, xHi] of allowed) {
-      const cand = target < xLo ? xLo : target > xHi ? xHi : target;
-      const d = Math.abs(cand - target);
-      if (d < bestD) { bestD = d; best = cand; }
-    }
-    return best;
-  };
-
-  const forbiddenFor = (it, track) => {
-    const forbidden = [];
-    const existingSame = (track < tracks.length) ? tracks[track] : [];
-    for (const other of existingSame) {
-      const half = (it.w + other.w) / 2 + TRACK_GAP_X;
-      forbidden.push([other.pillCenterX - half,
-                      other.pillCenterX + half]);
-    }
-    const nLower = Math.min(track, tracks.length);
-    for (let tt = 0; tt < nLower; tt++) {
-      for (const other of tracks[tt]) {
-        const half = other.w / 2 + CROSS_MARGIN;
-        forbidden.push([other.pillCenterX - half,
-                        other.pillCenterX + half]);
-      }
-    }
-    return forbidden;
-  };
-
-  for (const it of items) {
-    const minX = AREA_X0 + it.w / 2;
-    const maxX = AREA_X1 - it.w / 2;
-    if (minX > maxX) continue;
-    const target = clamp(it.anchorCx, minX, maxX);
-
-    const maxT = (tracks.length < MAX_TRACKS)
-      ? tracks.length
-      : MAX_TRACKS - 1;
-
-    let bestOption = null;
-    for (let t = 0; t <= maxT; t++) {
-      const forbidden = forbiddenFor(it, t);
-      const x = closestAllowedX(target, minX, maxX, forbidden);
-      if (x === null) continue;
-      const disp  = Math.abs(x - target);
-      const score = disp + t * TRACK_PENALTY;
-      if (bestOption === null || score < bestOption.score - 0.01) {
-        bestOption = { track: t, x, score, disp };
-      }
-    }
-
-    if (bestOption === null) {
-      if (tracks.length >= MAX_TRACKS) continue;
-      bestOption = { track: tracks.length, x: target, score: 0, disp: 0 };
-    }
-
-    if (bestOption.track === tracks.length) tracks.push([]);
-    it.track       = bestOption.track;
-    it.pillCenterX = bestOption.x;
-    it._baseDisp   = bestOption.disp;
-    tracks[bestOption.track].push(it);
+  const usableWidth = AREA_X1 - AREA_X0;
+  const totalPillW  = items.reduce((a, it) => a + it.w, 0);
+  let numRows = 1;
+  while (numRows < MAX_TRACKS) {
+    const needed = totalPillW + (items.length - numRows) * TRACK_GAP_X;
+    if (needed <= numRows * usableWidth) break;
+    numRows++;
   }
 
-  const validPlacement = (it, track, lowerTracks) => {
-    if (it.pillCenterX - it.w / 2 < AREA_X0 - 0.5) return false;
-    if (it.pillCenterX + it.w / 2 > AREA_X1 + 0.5) return false;
-    for (const other of track) {
-      if (other === it) continue;
-      const half = (it.w + other.w) / 2 + TRACK_GAP_X;
-      if (Math.abs(it.pillCenterX - other.pillCenterX) < half - 0.5)
-        return false;
-    }
-    for (const other of lowerTracks) {
-      const half = other.w / 2 + CROSS_MARGIN;
-      if (Math.abs(it.pillCenterX - other.pillCenterX) < half - 0.5)
-        return false;
-    }
-    return true;
-  };
+  const rows = [];
+  for (let i = 0; i < numRows; i++) rows.push([]);
+  for (let i = 0; i < items.length; i++) {
+    rows[i % numRows].push(items[i]);
+  }
 
-  for (let t = 0; t < tracks.length; t++) {
-    const track = tracks[t];
-    const lowerTracks = [];
-    for (let tt = 0; tt < t; tt++)
-      for (const o of tracks[tt]) lowerTracks.push(o);
+  for (let t = 0; t < rows.length; t++) {
+    const row = rows[t];
+    if (row.length === 0) continue;
 
-    for (let pass = 0; pass < 30; pass++) {
-      track.sort((a, b) => a.pillCenterX - b.pillCenterX);
-      let anySwap = false;
-      for (let i = 0; i < track.length - 1; i++) {
-        const a = track[i];
-        const b = track[i + 1];
-        if (a.anchorCx <= b.anchorCx) continue;
-        const ax = a.pillCenterX;
-        const bx = b.pillCenterX;
-        if (Math.abs(bx - a.anchorCx) > DISP_CAP_SWAP) continue;
-        if (Math.abs(ax - b.anchorCx) > DISP_CAP_SWAP) continue;
-        a.pillCenterX = bx;
-        b.pillCenterX = ax;
-        if (validPlacement(a, track, lowerTracks) &&
-            validPlacement(b, track, lowerTracks)) {
-          anySwap = true;
-        } else {
-          a.pillCenterX = ax;
-          b.pillCenterX = bx;
-        }
-      }
-      if (!anySwap) break;
+    const k = row.length;
+    const sumW = row.reduce((a, it) => a + it.w, 0);
+    const rowWidth = sumW + (k - 1) * COMPRESS_GAP;
+    const edgePad = Math.max(0, (usableWidth - rowWidth) / 2);
+
+    let cur = AREA_X0 + edgePad + row[0].w / 2;
+    row[0].pillCenterX = cur;
+    for (let i = 1; i < k; i++) {
+      cur += row[i - 1].w / 2 + COMPRESS_GAP + row[i].w / 2;
+      row[i].pillCenterX = cur;
     }
+
+    const rowRight = row[k - 1].pillCenterX + row[k - 1].w / 2;
+    if (rowRight > AREA_X1) {
+      const dx = rowRight - AREA_X1;
+      for (const it of row) it.pillCenterX -= dx;
+    }
+
+    for (const it of row) {
+      it.track     = t;
+      it._baseDisp = Math.abs(it.pillCenterX - it.anchorCx);
+    }
+    tracks.push(row);
   }
 
   const trackHeights = new Array(tracks.length).fill(0);
@@ -14238,60 +14857,13 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     : LABEL_CHANNEL_Y0 + (numChannels - 1) * LABEL_CHANNEL_STEP
       + LABEL_CHANNEL_GAP;
 
-  /* ---- Geometry optimisation runs FIRST.
-
-     refineLeaderOffsets fans apart the near-anchor vertical legs of
-     leaders that would otherwise overlap; optimizeLeaderGeometry then
-     tunes each leader's dive mode, bevels and jogs against the full
-     obstacle set.  Both steps change the polyline that gets drawn.
-
-     The style conflict graph must therefore be built AFTER they run —
-     it is a decision about the FINAL rendered polylines, not about the
-     default mode-0 shapes.  Building it earlier left the graph stale as
-     soon as the optimiser moved a leader: a switch to dive mode 2
-     deletes the near-anchor vertical leg and inserts a horizontal leg
-     at anchorY, so any conflict edge justified by the abandoned shape
-     was spurious, and a leader whose only partner was such an edge
-     came out dashed while looking completely isolated in the render. */
-
   refineLeaderOffsets(placed, topPad, trackOffsets, stripH);
-  optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets, boundaries,
-                          wireSegments, wallEdges);
 
-  /* ---- Style conflict graph — built from the FINAL paths. ---- */
+  polishLeaderLayout(placed, stripH, topPad, trackOffsets,
+                     boundaries, wireSegments, wallEdges);
+
   const conflictAdj = _buildStyleConflictGraph(placed, stripH, topPad,
                                                 trackOffsets);
-
-  /* ---- Style assignment, multi-pass ----
-
-     Default: solid.  A leader is dashed only if it would otherwise
-     run parallel-close to a leader that is already solid.  The
-     minimum such set is a minimum vertex cover of the conflict graph.
-
-     Solved per connected component:
-
-       • Bipartite components (chains, trees — the common case) are
-         two-coloured and the larger colour class is made solid.
-         This is the exact optimum and yields clean alternation.
-
-       • Non-bipartite components (odd cycles — e.g. three mutually
-         parallel leaders) are seeded by a degree-greedy cover, then
-         refined by two passes iterated to a fixed point:
-
-           promote — any dashed vertex with no solid neighbour is
-                     promoted back to solid.  The cover remains
-                     valid (that vertex was covering nothing) and
-                     the dash count drops.
-
-           swap    — a dashed vertex v whose every solid neighbour
-                     is also adjacent to some *other* dashed vertex
-                     is promoted.  This is a plateau move: the dash
-                     count drops by one and the cover stays valid,
-                     because each formerly-solid-covered edge v–u
-                     is still covered by u's other dashed neighbour.
-
-         The two passes are run repeatedly; in practice they
-         stabilise in two or three outer iterations. */
 
   const styleMap = new Map();
   const orderedForStyle =
@@ -14317,7 +14889,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       continue;
     }
 
-    /* --- Bipartite 2-colour. --- */
     let bipartite = true;
     const color = new Map([[comp[0], 0]]);
     const q2 = [comp[0]];
@@ -14340,7 +14911,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       continue;
     }
 
-    /* --- Non-bipartite: greedy cover. --- */
     const dashed = new Set();
     {
       const removed = new Set();
@@ -14359,11 +14929,9 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       }
     }
 
-    /* --- Refinement passes to a fixed point. --- */
     for (let outer = 0; outer < 30; outer++) {
       let changed = false;
 
-      /* promote: dashed with no solid neighbour → solid */
       for (const v of Array.from(dashed)) {
         let hasSolid = false;
         for (const u of conflictAdj.get(v) || []) {
@@ -14372,8 +14940,6 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
         if (!hasSolid) { dashed.delete(v); changed = true; }
       }
 
-      /* swap: dashed whose every solid neighbour is also adjacent to
-         some *other* dashed vertex → promote. */
       for (const v of Array.from(dashed)) {
         let ok = true;
         for (const u of conflictAdj.get(v) || []) {
@@ -14403,6 +14969,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     trackHeights,
     PAD_X, PAD_Y, LINE_H,
     pillNameOf,
+    areaX0: AREA_X0,
+    areaX1: AREA_X1,
   };
 }
 
@@ -14459,7 +15027,8 @@ function drawVertexLabels(c, placement, stripY, stripH) {
 
     const basePath = computeLeaderPath(
       anchorX, anchorY, offA, chanY, pillX, pillTopY,
-      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
+      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0,
+      it.startJog || 0);
 
     const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
     const path = _applyJogsToPath(bevelled, it);
@@ -14680,16 +15249,6 @@ function renderCableRunToCanvas(tcId) {
   const WALLS_H       = hasWalls
     ? INFO_HEADER_H + nWalls * WALL_ROW_H
     : 0;
-
-  /* The verbose hint paragraph that used to sit between the legend and
-     the wall-segment list has been removed.  Its facts — pill format,
-     west/east meaning, hatch legend — are either already on the page
-     (the swatches) or belong in the JSON schema doc, not on every
-     printed diagram.  Deleting it also fixes a bookkeeping mismatch:
-     HINTS_H under-declared the paragraph's real drawn height by 84 px,
-     so infoH was short, planRegionH was short, imgH was short, and the
-     bottom of the canvas — the last wall-segment legend rows — was
-     being clipped by cropCanvasToContent. */
 
   const infoH = BREAKDOWN_H
               + INFO_GAP
@@ -15100,12 +15659,6 @@ function renderCableRunToCanvas(tcId) {
       c.font = "500 14px ui-monospace, monospace";
       c.fillStyle = "#000000";
 
-      /* Two-column table: label on the left, value on the right.
-         The value column x is measured from the widest label in the
-         table, not hard-coded — the old fixed +110 px offset was
-         tuned for English and Spanish ("Tramos de pared") overran it,
-         printing over the value.  A minimum keeps the English layout
-         from collapsing when every label happens to be short. */
       const LABEL_MIN_COL_W = 96;
       const VALUE_GUTTER_PX = 10;
       let labelColW = LABEL_MIN_COL_W;
@@ -15214,13 +15767,10 @@ function renderCableRunToCanvas(tcId) {
     c.stroke();
     c.setLineDash([]);
 
-    /* White halo behind each node so it stays legible when the node
-       lands on a wall bar (which is a 7 px solid black stroke). */
     c.fillStyle = "#ffffff";
     c.beginPath(); c.arc(wp[0], wp[1], 6.5, 0, Math.PI * 2); c.fill();
     c.beginPath(); c.arc(fp[0], fp[1], 6.5, 0, Math.PI * 2); c.fill();
 
-    /* Black node on top. */
     c.fillStyle = "#000000";
     c.beginPath(); c.arc(wp[0], wp[1], 4, 0, Math.PI * 2); c.fill();
     c.beginPath(); c.arc(fp[0], fp[1], 4, 0, Math.PI * 2); c.fill();
@@ -15257,7 +15807,8 @@ function renderCableRunToCanvas(tcId) {
   const canvas = scaleCanvasToWidth(cropped, 2200);
 
   const meta = buildCableRunMeta(tcId, orderedIds, segDirectory, chunks,
-                                  labelPlacement.pillNameOf);
+                                  labelPlacement, stripOffsetX, stripW,
+                                  stripTotalMM);
 
   return { canvas, meta };
 }
