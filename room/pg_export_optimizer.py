@@ -14,6 +14,27 @@ guard that keeps a back-step jog from ever being accepted:
 
 Every parameter that describes a leader's geometry is optimisable.
 
+The conflicted-leader filter
+----------------------------
+The pass loop tries moves only for leaders that participate in some
+conflict.  Building that filter is a query against the current layout,
+and the query has to see every class of conflict the score sees — not
+just segment-segment and segment-pill, but also boundary, wall-edge,
+and parallel-wire proximity.
+
+An earlier revision called _conflictedLeaderIndices(layout) without
+passing the obstacle context.  Without the context, the filter only
+saw segment-segment and segment-pill conflicts.  A leader whose only
+conflict was with a wall-section boundary — like V15 whose descent
+sat 0.03 px from a boundary — was classified as clean, skipped by the
+optimiser, and left at offsetA = 0 forever.  The score still charged
+the boundary, so the layout was judged as conflicted; but the machine
+that decides WHICH leader to move couldn't see the boundary, so no
+candidate move was ever tried.
+
+Passing the context is the fix: the filter now returns the same set
+of conflicted leaders that the score charges.
+
 Pill-box proximity
 ------------------
 The tier-2b segment-vs-foreign-pill test expands the pill box by
@@ -26,11 +47,7 @@ The channel-to-pill tail
 ------------------------
 A tail goes from (pillX, chanY) down to (pillX, pillTopY).  It must
 avoid every foreign pill box in that y-range, and it must END at
-(pillX, pillTopY) — the top-centre of the leader's own pill.  An
-earlier single-detour shape returned [detourX, pillTopY] as its last
-point, which meant the leader's descent at detourX passed through
-whatever pill happened to sit at detourX, and the leader never
-reached its own pill.  The multi-band walk below is the fix:
+(pillX, pillTopY) — the top-centre of the leader's own pill.
 
     • collect every foreign box overlapping [chanY, pillTopY];
     • compute the bands where pillX is blocked (merged when within
@@ -42,38 +59,10 @@ reached its own pill.  The multi-band walk below is the fix:
         - horizontal at exitY from detourX back to pillX;
     • after the last band, descend at pillX to pillTopY.
 
-The entry and exit horizontals are placed at band.qT - M and
-band.qB + M, where M is the margin constant.  Bands are clamped to
-[chanY, pillTopY]: a band whose top is above chanY or whose bottom is
-below pillTopY only contributes the portion inside the tail's own
-y-range.  An earlier revision walked to band.qT - M and band.qB + M
-unconditionally, producing up-down-up detours whenever a band
-straddled either endpoint.
-
-The detour column for each band is the nearest edge of the band's
-union, walked outward in 6-px steps if the immediate candidate is
-itself blocked.  A candidate is only accepted when three tests pass
-at once:
-
-    • the descent at detourX from entryY to exitY is clear of every
-      box;
-    • the horizontal at entryY from pillX to detourX is clear;
-    • the horizontal at exitY from detourX to pillX is clear.
-
-Margin tuning
--------------
-M is the gap between a horizontal jog and the band edge it is
-avoiding, and between the detour column and the band's edge.  M = 4
-is a hair more than the visible stroke width (1.4 px leader plus
-1.2 px pill outline).  M is capped by the inter-track gap: with
-TRACK_V_GAP = 8 and EPS = 2, a horizontal at band.qT - M must
-satisfy band.qT - M > band.qT - 8 + EPS, i.e. M < 8 - 2 = 6.  M = 4
-sits comfortably inside that budget.
-
-EPS is the slack on the pill-box AABB used by both the blocker test
-and the horizontal / vertical clearance tests.  2 px keeps a detour
-from skimming the box without making the effective gap so small that
-no detour column can ever be found.
+entryY and exitY are clamped to [chanY, pillTopY], and a band whose
+clamp collapses is skipped entirely.  The detour column for each band
+is the nearest edge of the band's union, walked outward in 6-px steps
+if the immediate candidate is itself blocked.
 
 Jog-direction guard
 -------------------
@@ -123,9 +112,7 @@ const OPT_MAX_PASSES  = 8;
    After the last band, descend at pillX to pillTopY.
 
    Both entry and exit are clamped to [chanY, pillTopY], and a band
-   whose clamp collapses is skipped entirely.  This is what keeps the
-   walk from producing up-down-up shapes when a band straddles either
-   endpoint.
+   whose clamp collapses is skipped entirely.
 
    Detour column
    -------------
@@ -139,15 +126,12 @@ const OPT_MAX_PASSES  = 8;
      • hClear(exitY,  pillX, detourX)      — the bottom jog.
 
    If no candidate within the walk passes all three, the band falls
-   back to the preferred edge regardless.  This is a corner case that
-   requires the layout to be so dense that no gap exists between
-   adjacent tracks; it should not occur on normal inputs. */
+   back to the preferred edge regardless. */
 function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
                               stripBottom, topPad, trackOffsets) {
   const M = 4;
   const EPS = 2;
 
-  /* Foreign pill boxes that overlap the tail's own y-range. */
   const boxes = [];
   for (const Q of placed) {
     if (Q === self) continue;
@@ -162,14 +146,12 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     });
   }
 
-  /* Blockers: boxes whose x-range contains pillX. */
   const blockers = [];
   for (const b of boxes) {
     if (pillX >= b.qL - EPS && pillX <= b.qR + EPS) blockers.push(b);
   }
   if (!blockers.length) return [[pillX, pillTopY]];
 
-  /* Sort by top edge, merge into bands. */
   blockers.sort((a, b) => a.qT - b.qT);
   const bands = [];
   let cur = { qT: blockers[0].qT, qB: blockers[0].qB,
@@ -187,8 +169,6 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
   }
   bands.push(cur);
 
-  /* A horizontal at y from xa to xb is clear if no box overlaps
-     both its x-span and its y-position (within EPS). */
   const hClear = (y, xa, xb) => {
     const lo = Math.min(xa, xb), hi = Math.max(xa, xb);
     for (const b of boxes) {
@@ -199,8 +179,6 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     return true;
   };
 
-  /* A vertical at x from ya to yb is clear if no box overlaps both
-     its x-position and its y-span (within EPS). */
   const vClear = (x, ya, yb) => {
     const lo = Math.min(ya, yb), hi = Math.max(ya, yb);
     for (const b of boxes) {
@@ -219,13 +197,11 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     const exitY  = Math.min(pillTopY, band.qB + M);
     if (entryY >= exitY - 0.5) continue;
 
-    /* Descend at pillX from curY to entryY. */
     if (entryY > curY + 0.5) {
       out.push([pillX, entryY]);
       curY = entryY;
     }
 
-    /* Choose the detour column for this band. */
     const leftX  = band.qL - M;
     const rightX = band.qR + M;
     const preferRight = (rightX - pillX) < (pillX - leftX);
@@ -369,21 +345,13 @@ function _jogSegment(points, segIdx, shift) {
    (the direction of its own horizontal run — the sign of
    pillCenterX minus anchorCx minus offsetA), the path continues
    smoothly past the jog.  If the slide goes the other way, the path
-   reverses direction: the horizontal run arrives at the descent, then
-   the descent briefly steps back the way the horizontal came from,
-   then continues down.  The visual is an S-curve or "bump" at the
-   descent — a visible return-in-place.
+   reverses direction.
 
-   An earlier revision did not check this and the optimiser, which only
-   scores, happily accepted back-step jogs.  The fix is to reject the
-   jog here: the optimiser still tries the same numeric candidates, but
-   the ones that would create a back-step produce an unchanged path, so
-   the score does not improve and the move is not selected.
-
-   A non-zero forward jog is still allowed.  It shifts the descent in
-   the leader's travel direction, which extends the path rather than
-   reversing it — that can be useful for dodging a pill box on the
-   descent without making a visible kink. */
+   _applyJogsToPath rejects a jog whose sign is opposite the direction
+   of the leader's own horizontal run.  The optimiser still tries the
+   same numeric candidates, but the ones that would create a back-step
+   produce an unchanged path, so the score does not improve and the
+   move is not selected. */
 
 function _applyJogsToPath(path, it) {
   let p = path;
@@ -456,8 +424,12 @@ const OFFSET_A_STEPS = [-8, -2, 2, 8];
    scored against the layout with the complete exhaustive tier list.
    Only strictly-improving moves are accepted.
 
-   The pass loop skips leaders with no conflict at all — in a typical
-   19-pill layout that is 2/3 of them. */
+   The pass loop skips leaders with no conflict at all.  "Conflict"
+   here means any conflict the SCORE charges for — segment-segment,
+   segment-pill, boundary, wall-edge, or parallel-wire.  The
+   conflictedLeaderIndices filter is built with the same obstacle
+   context the pill push uses, so the two agree on which leaders
+   matter. */
 function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                                 boundaries, wireSegments, wallEdges) {
   for (const it of placed) {
@@ -470,6 +442,19 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
   const bxs   = Array.isArray(boundaries)   ? boundaries   : [];
   const wires = Array.isArray(wireSegments) ? wireSegments : [];
   const wes   = Array.isArray(wallEdges)    ? wallEdges    : [];
+
+  /* The obstacle context: everything the conflicted-leader filter
+     needs to see boundary, wall-edge, and parallel-wire conflicts
+     the same way the score does.  Without this, a leader whose only
+     conflict is with a wall-section boundary is filtered out as
+     "clean" and no candidate move is ever tried for it. */
+  const obstacleContext = {
+    boundaries:   bxs,
+    wireSegments: wires,
+    wallEdges:    wes,
+    placed:       placed,
+    stripH:       stripH,
+  };
 
   function evaluate() {
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
@@ -535,6 +520,28 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           const t = _segBoxOverlap(s, expanded);
           if (t > 0) { pillCount++; pillDepth += t; }
         }
+      }
+    }
+
+    /* --- tier 1b: double crossings ---
+
+       A leader pair that crosses once is routing.  A pair that
+       crosses twice is weaving.  The extra crossings are counted
+       here and charged at a tier of their own, above the head
+       tier, so that the optimiser trades a second crossing for a
+       first crossing elsewhere rather than accumulating crossings
+       on a single pair.
+
+       The score term is `extraCrossings × DOUBLE_CROSS_EXTRA_W`,
+       where extraCrossings = Σ_pairs max(0, crossings(pair) − 1).
+       Independent single crossings are unaffected: a pair with one
+       crossing contributes zero here and its cost continues to be
+       the ordinary segment-segment tier below. */
+    let extraCrossings = 0;
+    for (let i = 0; i < pathSegs.length; i++) {
+      for (let j = i + 1; j < pathSegs.length; j++) {
+        const n = _countSegmentCrossings(pathSegs[i], pathSegs[j]);
+        if (n >= 2) extraCrossings += (n - 1);
       }
     }
 
@@ -673,9 +680,10 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
       pillCount    * 5e11 + pillDepth    * 5e10 +
       wireParCount * 1e11 + wireParDepth * 1e10 +
       weCount      * 1e11 + weDepth      * 1e10 +
+      bCount       * 1e11 + bDepth       * 1e10 +
       headCount    * 1e10 + headDepth    * 1e9  +
+      extraCrossings * DOUBLE_CROSS_EXTRA_W +
       segCount     * 1e9  + segDepth     * 1e8  +
-      bCount       * 1e9  + bDepth       * 1e8  +
       wireCount    * 1e9  + wireDepth    * 1e8  +
       cornerCount  * 1e6  + cornerDepth  * 1e5;
 
@@ -687,7 +695,11 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
 
   for (let pass = 0; pass < OPT_MAX_PASSES; pass++) {
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-    const conflicted = _conflictedLeaderIndices(layout);
+    /* Pass the obstacle context so the filter sees boundary,
+       wall-edge, and parallel-wire conflicts, exactly as the score
+       does.  Without it, a leader whose only conflict is with a
+       boundary is filtered out as clean and never given a chance. */
+    const conflicted = _conflictedLeaderIndices(layout, obstacleContext);
 
     let best = null;
 

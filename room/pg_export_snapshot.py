@@ -7,32 +7,39 @@ called thousands of times per export.  Building the layout once per
 candidate and handing the paths, segments, and pill boxes to every
 tier check is what makes the optimiser usable at scale.
 
-The three functions:
-
     _buildLayout              one build, hands back paths, segments,
                               and pill boxes
     _countConflictsAt         every conflict of one leader against
-                              the layout — segment-segment and
-                              segment-foreign-pill-box
+                              the layout
     _leaderHasConflictAt      the same test, early-exit on first hit
     _conflictedLeaderIndices  the set of leaders that participate in
-                              any conflict at all, so the optimiser's
-                              pass loop can skip the clean ones
+                              any conflict at all
+
+The obstacle context
+--------------------
+_countConflictsAt takes an optional `obstacleContext` parameter
+carrying { boundaries, wireSegments, wallEdges, placed, stripH }.
+
+Without it, only segment-segment and segment-foreign-pill conflicts
+are counted — the behaviour the optimiser's inner evaluate() relies
+on when it is scoring raw geometry.
+
+With it, the counter ALSO adds boundary, wall-edge, and wire
+conflicts, so a caller that can move pills (the pill push) sees the
+full conflict picture.  Without this, the pill push had no reason to
+avoid sliding a descent column onto a wall-section boundary: the
+counter said zero conflicts for a leader whose only problem was a
+0.6-px gap to a boundary line, and the push skipped that leader.
+
+The context is a plain object so a caller can pass a single value
+through many intermediate call sites without threading four
+arguments each time.
 
 Proximity to a pill box
 -----------------------
 Every foreign-pill test expands the box by PILL_PROX before asking
-whether a segment overlaps it.  This is what turns "the descent
-column runs 2.4 px to the left of the pill above" into a countable
-conflict: with the exact box the segment is outside and scores zero;
-with the box expanded by PILL_PROX the segment is inside and scores
-one.  The pill push, whose only move is "slide a pill sideways until
-the acting leader's conflict count drops", now has a reason to open
-a gap.
-
-The expansion is uniform across the two functions here and the
-optimiser's tier-2b, so the snapshot counter, the pass-loop filter,
-and the scorer all agree on what "a conflict with a pill box" means.
+whether a segment overlaps it, so a descent column 2.4 px from a
+pill edge counts as a conflict even when it does not intersect.
 """
 
 
@@ -64,9 +71,6 @@ function _buildLayout(placed, stripH, topPad, trackOffsets) {
   return { paths, segs, boxes };
 }
 
-/* Small helper: the PILL_PROX-expanded box, or the box itself if
-   PILL_PROX is zero.  Called once per (segment, foreign-pill) pair
-   in the hot loops, so it does the arithmetic inline. */
 function _expandBox(box, prox) {
   return {
     qL: box.qL - prox,
@@ -77,15 +81,28 @@ function _expandBox(box, prox) {
 }
 
 /* Count all conflicts of one leader (index idx) against the layout.
-   Foreign pill boxes are expanded by PILL_PROX before the overlap
-   test, so a segment running within PILL_PROX of a pill edge counts
-   as a conflict even when it does not intersect the box. */
-function _countConflictsAt(idx, layout) {
+
+   Basic conflicts (always counted):
+     • segment-segment within SEG_MIN_SEP of a foreign leader;
+     • segment-foreign-pill within PILL_PROX of the expanded box.
+
+   Additional conflicts (counted only when obstacleContext is
+   passed):
+     • boundary, wall-edge, and wire penalties from
+       pg_export_penalties, evaluated on this leader's segments only.
+
+   The boundary / wall-edge / wire penalties are single-count
+   quantities (they do not have a foreign-leader to double-count),
+   so no division by two is needed. */
+function _countConflictsAt(idx, layout, obstacleContext) {
   const selfSegs = layout.segs[idx];
   let n = 0;
+
   for (let j = 0; j < layout.segs.length; j++) {
     if (j === idx) continue;
     const otherSegs = layout.segs[j];
+
+    /* Base segment-segment conflicts. */
     for (let a = 0; a < selfSegs.length; a++) {
       const sa = selfSegs[a];
       for (let b = 0; b < otherSegs.length; b++) {
@@ -99,17 +116,38 @@ function _countConflictsAt(idx, layout) {
         if (d < SEG_MIN_SEP) n++;
       }
     }
+
+    /* Foreign pill proximity. */
     const expanded = _expandBox(layout.boxes[j], PILL_PROX);
     for (const s of selfSegs) {
       if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
       if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
       if (_segBoxOverlap(s, expanded) > 0) n++;
     }
+
+    /* Extra crossings beyond the first between this pair. */
+    const xc = _countSegmentCrossings(selfSegs, otherSegs);
+    if (xc >= 2) n += (xc - 1);
+  }
+
+  if (obstacleContext) {
+    const { boundaries, wireSegments, wallEdges, placed, stripH } =
+      obstacleContext;
+    if (boundaries && boundaries.length) {
+      n += _boundaryOverlapPenalty(selfSegs, boundaries, stripH).count;
+    }
+    if (wallEdges && wallEdges.length) {
+      n += _wallEdgeOverlapPenalty(selfSegs, wallEdges).count;
+    }
+    if (wireSegments && wireSegments.length) {
+      const wPen = _wireOverlapPenalty(selfSegs, placed, wireSegments);
+      n += wPen.parCount * 2 + (wPen.count - wPen.parCount);
+    }
   }
   return n;
 }
 
-function _leaderHasConflictAt(idx, layout) {
+function _leaderHasConflictAt(idx, layout, obstacleContext) {
   const selfSegs = layout.segs[idx];
   for (let j = 0; j < layout.segs.length; j++) {
     if (j === idx) continue;
@@ -131,15 +169,31 @@ function _leaderHasConflictAt(idx, layout) {
       if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
       if (_segBoxOverlap(s, expanded) > 0) return true;
     }
+    const xc = _countSegmentCrossings(selfSegs, otherSegs);
+    if (xc >= 2) return true;
+  }
+  if (obstacleContext) {
+    const { boundaries, wireSegments, wallEdges, placed, stripH } =
+      obstacleContext;
+    if (boundaries && boundaries.length &&
+        _boundaryOverlapPenalty(selfSegs, boundaries, stripH).count > 0)
+      return true;
+    if (wallEdges && wallEdges.length &&
+        _wallEdgeOverlapPenalty(selfSegs, wallEdges).count > 0)
+      return true;
+    if (wireSegments && wireSegments.length) {
+      const wPen = _wireOverlapPenalty(selfSegs, placed, wireSegments);
+      if (wPen.parCount > 0) return true;
+    }
   }
   return false;
 }
 
-function _conflictedLeaderIndices(layout) {
+function _conflictedLeaderIndices(layout, obstacleContext) {
   const s = new Set();
   const n = layout.segs.length;
   for (let i = 0; i < n; i++) {
-    if (_leaderHasConflictAt(i, layout)) s.add(i);
+    if (_leaderHasConflictAt(i, layout, obstacleContext)) s.add(i);
   }
   return s;
 }

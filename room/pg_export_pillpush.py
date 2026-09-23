@@ -12,7 +12,11 @@ Two cases are covered:
 
     2.  Every foreign pill whose OWNER is in conflict with the
         acting leader is nudged.  "In conflict" means
-        segment-segment OR segment-pillbox.
+        segment-segment OR segment-pillbox OR (now) boundary /
+        wall-edge / wire proximity — the obstacle context is
+        threaded through so a pill whose descent column sits too
+        near a wall-section boundary counts as conflicted and the
+        push tries to move it.
 
 A same-track pill-collision guard
 ---------------------------------
@@ -23,23 +27,14 @@ safely overlap horizontally; that is what the track system is for.
 The pill push respects this with a hard gate: before any candidate
 position is scored, the pill is checked against every other pill in
 its own track.  If the moved pill would come within PILL_PROX of a
-same-track neighbour, that candidate is skipped.  The gate is
-impossible to violate from a fresh start, because the initial
-assignment from computeVertexLabelPlacement already packs same-track
-pills at COMPRESS_GAP (20 px) apart.
-
-A one-time _separatePillsInTracks pre-pass at the top of the push
-runs first and pushes any already-too-close pairs apart, left to
-right per track, so the push always starts from a valid state.
-Without the pre-pass a pill that was already overlapping on entry
-would stay overlapping, because the gate only prevents new
-violations.
+same-track neighbour, that candidate is skipped.  A one-time
+_separatePillsInTracks pre-pass at the top of the push runs first
+and pushes any already-too-close pairs apart, left to right per
+track.
 
 buildPathSegsFor is the same helper the conflict counter uses: it
 rebuilds one leader's current path segments from its optimisable
-fields, without going through the full _buildLayout pipeline.  It
-reads the same jog-direction guard as the optimiser, so the segments
-it produces are exactly the segments the optimiser scored.
+fields, without going through the full _buildLayout pipeline.
 """
 
 
@@ -60,10 +55,6 @@ function buildPathSegsFor(it, placed, stripH, topPad, trackOffsets) {
   return _pathSegments(path, -1, SEG_MIN_LEN);
 }
 
-/* Does the pill at index idx overlap, or come within PILL_PROX of,
-   any other pill in the same track?  Two pills in different tracks
-   are at different y and cannot visually overlap, so the check is
-   restricted to the same track. */
 function _pillHasSameTrackCollision(idx, placed) {
   const me = placed[idx];
   const myTrack = me.track;
@@ -81,11 +72,6 @@ function _pillHasSameTrackCollision(idx, placed) {
   return false;
 }
 
-/* One-time left-to-right separation per track.  Any pill that comes
-   within PILL_PROX of the pill immediately to its left is nudged to
-   the right by exactly enough to restore the gap.  Runs once at the
-   top of the push, so the pill push always starts from a valid
-   layout. */
 function _separatePillsInTracks(placed) {
   const byTrack = new Map();
   for (let i = 0; i < placed.length; i++) {
@@ -109,14 +95,13 @@ function _separatePillsInTracks(placed) {
   }
 }
 
-function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
+function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets,
+                                     obstacleContext) {
   const PUSH = [];
   for (let d = 4; d <= 32; d += 4) { PUSH.push(d); PUSH.push(-d); }
 
   const MAX_ROUNDS = 3;
 
-  /* Resolve any pre-existing same-track overlap before the
-     conflict-driven moves begin.  Idempotent on a clean layout. */
   _separatePillsInTracks(placed);
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -125,25 +110,21 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
     for (let li = 0; li < placed.length; li++) {
       const it = placed[li];
       let layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-      const before = _countConflictsAt(li, layout);
+      const before = _countConflictsAt(li, layout, obstacleContext);
       if (before === 0) continue;
 
-      /* 1. Try moving A's own pill. */
       const origX = it.pillCenterX;
       let bestX = origX, bestN = before;
       for (const dX of PUSH) {
         it.pillCenterX = origX + dX;
         if (_pillHasSameTrackCollision(li, placed)) continue;
         layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-        const n = _countConflictsAt(li, layout);
+        const n = _countConflictsAt(li, layout, obstacleContext);
         if (n < bestN) { bestN = n; bestX = origX + dX; }
       }
       it.pillCenterX = bestX;
       if (bestX !== origX) anyMoved = true;
 
-      /* 2. If still conflicted, try every foreign pill whose OWNER
-            is in conflict with A — segment-segment OR
-            segment-pillbox. */
       if (bestN > 0) {
         const involved = new Set();
         const selfSegs = layout.segs[li];
@@ -168,12 +149,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
 
           if (!cflt) {
             const box = layout.boxes[j];
-            const expanded = {
-              qL: box.qL - PILL_PROX,
-              qR: box.qR + PILL_PROX,
-              qT: box.qT - PILL_PROX,
-              qB: box.qB + PILL_PROX,
-            };
+            const expanded = _expandBox(box, PILL_PROX);
             for (const s of selfSegs) {
               if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
               if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
@@ -192,7 +168,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
             foreign.pillCenterX = fOrigX + dX;
             if (_pillHasSameTrackCollision(j, placed)) continue;
             layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-            const n = _countConflictsAt(li, layout);
+            const n = _countConflictsAt(li, layout, obstacleContext);
             if (n < fBestN) { fBestN = n; fBestX = fOrigX + dX; }
           }
           foreign.pillCenterX = fBestX;
@@ -212,10 +188,18 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
                             boundaries, wireSegments, wallEdges) {
   const MAX_ROUNDS = 6;
 
+  const obstacleContext = {
+    boundaries:   boundaries   || [],
+    wireSegments: wireSegments || [],
+    wallEdges:    wallEdges    || [],
+    placed:       placed,
+    stripH:       stripH,
+  };
+
   const initialLayout = _buildLayout(placed, stripH, topPad, trackOffsets);
   let prev = 0;
   for (let i = 0; i < placed.length; i++) {
-    prev += _countConflictsAt(i, initialLayout);
+    prev += _countConflictsAt(i, initialLayout, obstacleContext);
   }
   prev = Math.floor(prev / 2);
   if (prev === 0) return;
@@ -223,12 +207,13 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
   for (let round = 0; round < MAX_ROUNDS; round++) {
     optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                            boundaries, wireSegments, wallEdges);
-    pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets);
+    pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets,
+                                obstacleContext);
 
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
     let now = 0;
     for (let i = 0; i < placed.length; i++) {
-      now += _countConflictsAt(i, layout);
+      now += _countConflictsAt(i, layout, obstacleContext);
     }
     now = Math.floor(now / 2);
 

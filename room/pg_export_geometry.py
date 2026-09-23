@@ -1,49 +1,48 @@
 """
 pg_export_geometry.py — the pure distance and segment-pair atoms.
 
-The mathematical primitives every other module sits on:
+    SEG_MIN_SEP / SEG_MIN_LEN / PARALLEL_TOL   the three base thresholds
+    PILL_PROX                                   minimum clearance to a
+                                               foreign pill box
+    BOUNDARY_MIN_SEP                            minimum clearance to a
+                                               wall-section boundary
+    WIRE_MIN_SEP                                minimum clearance to
+                                               the cable wire
+    WIRE_PARALLEL_TOL                           "alongside the wire"
+                                               angle gate
+    DOUBLE_CROSS_EXTRA_W                        the score weight of one
+                                               extra crossing between a
+                                               leader pair already
+                                               crossing once
+    _pointSegDist / _segSegDist                 distance atoms
+    _pathSegments                               polyline → segments
+    _angleDiff                                  acute angle
+    _findSegmentConflicts                       O(n²) bbox-pre-rejected
+                                               sweep
+    _segBoxOverlap                              segment vs. AABB
+    _segSegProperCross                          do two segments properly
+                                               cross (endpoint touches
+                                               excluded)?
+    _countSegmentCrossings                      how many times do two
+                                               segment lists properly
+                                               cross?
 
-    SEG_MIN_SEP / SEG_MIN_LEN / PARALLEL_TOL   the three constants
-                                               every distance test
-                                               uses
-    PILL_PROX                                   the minimum clearance
-                                               a leader segment must
-                                               keep from a foreign
-                                               pill box.  Equal to
-                                               SEG_MIN_SEP: the same
-                                               "too close to matter"
-                                               threshold that governs
-                                               segment-vs-segment
-                                               conflicts, applied to
-                                               the segment-vs-pill
-                                               case
-    _pointSegDist / _segSegDist                the two distance atoms
-    _pathSegments                              a polyline → segment
-                                               records with bounding
-                                               boxes, kind, and angle
-    _angleDiff                                 the acute angle
-    _findSegmentConflicts                      the O(n²) sweep with
-                                               bbox pre-reject
-    _segBoxOverlap                             segment vs. AABB, via
-                                               Liang-Barsky
+Double-crossing
+---------------
+Two leaders crossing once is unavoidable: their anchors are on opposite
+sides of the strip and the leader field's whole job is to route between
+them.  Two leaders crossing twice means the polylines weave around each
+other — which reads as noise, not as routing.
 
-Two behavioural notes that follow from the constants:
+_countSegmentCrossings counts PROPER crossings: a segment from A and a
+segment from B intersect at a point strictly interior to both.  Shared
+endpoints and collinear overlaps do not count (they are respectively
+the anchor-sharing and the parallel-overlap cases handled elsewhere).
 
-    PILL_PROX == SEG_MIN_SEP
-        A leader segment within PILL_PROX of a foreign pill box
-        counts as a conflict, exactly as a segment within
-        SEG_MIN_SEP of another segment does.  Earlier revisions used
-        the exact box (PILL_PROX = 0), which meant a descent column
-        2.4 px from a pill edge scored zero — and the pill push, whose
-        only job is to reduce the conflict count, had no reason to
-        open that gap.  The result was leaders running tangentially
-        along pill boxes forever.
-
-    _findSegmentConflicts handles every pair kind uniformly
-        V-V, H-H, V-H, V-D, H-D, D-D, and any parallel non-collinear
-        offset, all through the same distance test.  An earlier
-        revision silently skipped H-H pairs, which was the root cause
-        of most of the visible leader overlaps.  That skip is gone.
+The optimiser consumes this per pair: it charges
+DOUBLE_CROSS_EXTRA_W for each crossing beyond the first between the
+same two leaders, in a tier of its own between the head tier and the
+base segment tier.
 """
 
 
@@ -53,15 +52,20 @@ GEO_JS = r"""
 const SEG_MIN_SEP  = 6.0;
 const SEG_MIN_LEN  = 5.0;
 
-/* Minimum clearance a leader segment must keep from a foreign pill
-   box.  Equal to SEG_MIN_SEP: "too close to matter" is the same
-   threshold for a segment near another segment and for a segment
-   near a pill outline.  Two stroke widths plus a hair of air is
-   enough for a reader to see that the two marks are separate; less
-   than that and they read as touching. */
 const PILL_PROX = SEG_MIN_SEP;
 
+const BOUNDARY_MIN_SEP = 10.0;
+const WIRE_MIN_SEP = 10.0;
+const WIRE_PARALLEL_TOL = Math.PI / 6;
+
 const PARALLEL_TOL = Math.PI / 12;
+
+/* Weight of one extra crossing between two leaders that already cross
+   at least once.  Sits between the head tier (1e10) and the parallel
+   / boundary tiers (1e11): strong enough to make the optimiser trade
+   a second crossing for a first crossing elsewhere, weak enough that
+   it never beats avoiding a parallel overlap or a boundary hug. */
+const DOUBLE_CROSS_EXTRA_W = 5e10;
 
 function _pointSegDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay;
@@ -144,5 +148,38 @@ function _segBoxOverlap(s, box) {
   if (!clip(-dy, y0 - box.qT)) return 0;
   if (!clip( dy, box.qB - y0)) return 0;
   return Math.max(0, t1 - t0);
+}
+
+/* ---- Proper segment crossing ----
+
+   Two segments properly cross when their lines intersect at a point
+   that is strictly interior to both.  Endpoint touches (shared anchors,
+   T-junctions) are excluded by the 1e-6 parameter epsilon on each side,
+   and parallel-or-collinear pairs are excluded by the denom check. */
+function _segSegProperCross(a, b) {
+  const d1x = a.bx - a.ax, d1y = a.by - a.ay;
+  const d2x = b.bx - b.ax, d2y = b.by - b.ay;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return false;
+  const rx = b.ax - a.ax, ry = b.ay - a.ay;
+  const t = (rx * d2y - ry * d2x) / denom;
+  const u = (rx * d1y - ry * d1x) / denom;
+  return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6;
+}
+
+/* Count proper crossings between two segment lists.  Bbox pre-reject
+   skips pairs that cannot possibly cross. */
+function _countSegmentCrossings(segsA, segsB) {
+  let n = 0;
+  for (let i = 0; i < segsA.length; i++) {
+    const a = segsA[i];
+    for (let j = 0; j < segsB.length; j++) {
+      const b = segsB[j];
+      if (a.maxX + 0.5 < b.minX || b.maxX + 0.5 < a.minX) continue;
+      if (a.maxY + 0.5 < b.minY || b.maxY + 0.5 < a.minY) continue;
+      if (_segSegProperCross(a, b)) n++;
+    }
+  }
+  return n;
 }
 """

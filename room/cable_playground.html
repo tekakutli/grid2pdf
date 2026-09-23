@@ -12359,6 +12359,20 @@ function _pat(ctx, kind) {
 
 window.filterCollinearVerticesInStrip = false;
 
+/* Collinear-anchor filter.
+
+   Drops the middle anchor of any three consecutive wall-edge anchors
+   that sit on the same wall segment, at the same height, and on a
+   straight line through their two neighbours.
+
+   The same-segment check matters.  The room model can represent one
+   physical wall as several segments — a column flush against it, an
+   opening that punches through, a step riser that splits the stretch —
+   and the boundary between those segments is a real vertex a cable can
+   cross.  A cable running along a wall past the point where the wall
+   was split must still show the vertex there.  Keeping the vertex also
+   keeps the pill's two side-distance readings attached to the wall
+   they were measured along. */
 function _collapseStripCollinear(orderedIds) {
   if (!window.filterCollinearVerticesInStrip) return orderedIds.slice();
   if (orderedIds.length < 3) return orderedIds.slice();
@@ -12401,6 +12415,8 @@ function _collapseStripCollinear(orderedIds) {
 /* ==========================================================================
    CABLE RUN EXPORT
    ========================================================================== */
+
+/* ---- Linearization ---- */
 
 function computeAnchor3D(a) {
   if (!a) return null;
@@ -12725,7 +12741,6 @@ function buildCableRunMeta(tcId, orderedIds, segDirectory, chunks,
         bevel1:   _r2(it.bevel1 || 0),
         jog0:     _r2(it.jog0   || 0),
         jog1:     _r2(it.jog1   || 0),
-        startJog: _r2(it.startJog || 0),
 
         leaderStyle: (it.leaderStyle === 1) ? "dashed" : "solid",
 
@@ -13109,15 +13124,20 @@ function refineLeaderOffsets(placed, topPad, trackOffsets, stripH) {
 const SEG_MIN_SEP  = 6.0;
 const SEG_MIN_LEN  = 5.0;
 
-/* Minimum clearance a leader segment must keep from a foreign pill
-   box.  Equal to SEG_MIN_SEP: "too close to matter" is the same
-   threshold for a segment near another segment and for a segment
-   near a pill outline.  Two stroke widths plus a hair of air is
-   enough for a reader to see that the two marks are separate; less
-   than that and they read as touching. */
 const PILL_PROX = SEG_MIN_SEP;
 
+const BOUNDARY_MIN_SEP = 10.0;
+const WIRE_MIN_SEP = 10.0;
+const WIRE_PARALLEL_TOL = Math.PI / 6;
+
 const PARALLEL_TOL = Math.PI / 12;
+
+/* Weight of one extra crossing between two leaders that already cross
+   at least once.  Sits between the head tier (1e10) and the parallel
+   / boundary tiers (1e11): strong enough to make the optimiser trade
+   a second crossing for a first crossing elsewhere, weak enough that
+   it never beats avoiding a parallel overlap or a boundary hug. */
+const DOUBLE_CROSS_EXTRA_W = 5e10;
 
 function _pointSegDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay;
@@ -13202,6 +13222,39 @@ function _segBoxOverlap(s, box) {
   return Math.max(0, t1 - t0);
 }
 
+/* ---- Proper segment crossing ----
+
+   Two segments properly cross when their lines intersect at a point
+   that is strictly interior to both.  Endpoint touches (shared anchors,
+   T-junctions) are excluded by the 1e-6 parameter epsilon on each side,
+   and parallel-or-collinear pairs are excluded by the denom check. */
+function _segSegProperCross(a, b) {
+  const d1x = a.bx - a.ax, d1y = a.by - a.ay;
+  const d2x = b.bx - b.ax, d2y = b.by - b.ay;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return false;
+  const rx = b.ax - a.ax, ry = b.ay - a.ay;
+  const t = (rx * d2y - ry * d2x) / denom;
+  const u = (rx * d1y - ry * d1x) / denom;
+  return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6;
+}
+
+/* Count proper crossings between two segment lists.  Bbox pre-reject
+   skips pairs that cannot possibly cross. */
+function _countSegmentCrossings(segsA, segsB) {
+  let n = 0;
+  for (let i = 0; i < segsA.length; i++) {
+    const a = segsA[i];
+    for (let j = 0; j < segsB.length; j++) {
+      const b = segsB[j];
+      if (a.maxX + 0.5 < b.minX || b.maxX + 0.5 < a.minX) continue;
+      if (a.maxY + 0.5 < b.minY || b.maxY + 0.5 < a.minY) continue;
+      if (_segSegProperCross(a, b)) n++;
+    }
+  }
+  return n;
+}
+
 /* ==========================================================================
    LAYOUT SNAPSHOT — one build per candidate
    ========================================================================== */
@@ -13229,9 +13282,6 @@ function _buildLayout(placed, stripH, topPad, trackOffsets) {
   return { paths, segs, boxes };
 }
 
-/* Small helper: the PILL_PROX-expanded box, or the box itself if
-   PILL_PROX is zero.  Called once per (segment, foreign-pill) pair
-   in the hot loops, so it does the arithmetic inline. */
 function _expandBox(box, prox) {
   return {
     qL: box.qL - prox,
@@ -13242,15 +13292,28 @@ function _expandBox(box, prox) {
 }
 
 /* Count all conflicts of one leader (index idx) against the layout.
-   Foreign pill boxes are expanded by PILL_PROX before the overlap
-   test, so a segment running within PILL_PROX of a pill edge counts
-   as a conflict even when it does not intersect the box. */
-function _countConflictsAt(idx, layout) {
+
+   Basic conflicts (always counted):
+     • segment-segment within SEG_MIN_SEP of a foreign leader;
+     • segment-foreign-pill within PILL_PROX of the expanded box.
+
+   Additional conflicts (counted only when obstacleContext is
+   passed):
+     • boundary, wall-edge, and wire penalties from
+       pg_export_penalties, evaluated on this leader's segments only.
+
+   The boundary / wall-edge / wire penalties are single-count
+   quantities (they do not have a foreign-leader to double-count),
+   so no division by two is needed. */
+function _countConflictsAt(idx, layout, obstacleContext) {
   const selfSegs = layout.segs[idx];
   let n = 0;
+
   for (let j = 0; j < layout.segs.length; j++) {
     if (j === idx) continue;
     const otherSegs = layout.segs[j];
+
+    /* Base segment-segment conflicts. */
     for (let a = 0; a < selfSegs.length; a++) {
       const sa = selfSegs[a];
       for (let b = 0; b < otherSegs.length; b++) {
@@ -13264,17 +13327,38 @@ function _countConflictsAt(idx, layout) {
         if (d < SEG_MIN_SEP) n++;
       }
     }
+
+    /* Foreign pill proximity. */
     const expanded = _expandBox(layout.boxes[j], PILL_PROX);
     for (const s of selfSegs) {
       if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
       if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
       if (_segBoxOverlap(s, expanded) > 0) n++;
     }
+
+    /* Extra crossings beyond the first between this pair. */
+    const xc = _countSegmentCrossings(selfSegs, otherSegs);
+    if (xc >= 2) n += (xc - 1);
+  }
+
+  if (obstacleContext) {
+    const { boundaries, wireSegments, wallEdges, placed, stripH } =
+      obstacleContext;
+    if (boundaries && boundaries.length) {
+      n += _boundaryOverlapPenalty(selfSegs, boundaries, stripH).count;
+    }
+    if (wallEdges && wallEdges.length) {
+      n += _wallEdgeOverlapPenalty(selfSegs, wallEdges).count;
+    }
+    if (wireSegments && wireSegments.length) {
+      const wPen = _wireOverlapPenalty(selfSegs, placed, wireSegments);
+      n += wPen.parCount * 2 + (wPen.count - wPen.parCount);
+    }
   }
   return n;
 }
 
-function _leaderHasConflictAt(idx, layout) {
+function _leaderHasConflictAt(idx, layout, obstacleContext) {
   const selfSegs = layout.segs[idx];
   for (let j = 0; j < layout.segs.length; j++) {
     if (j === idx) continue;
@@ -13296,26 +13380,54 @@ function _leaderHasConflictAt(idx, layout) {
       if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
       if (_segBoxOverlap(s, expanded) > 0) return true;
     }
+    const xc = _countSegmentCrossings(selfSegs, otherSegs);
+    if (xc >= 2) return true;
+  }
+  if (obstacleContext) {
+    const { boundaries, wireSegments, wallEdges, placed, stripH } =
+      obstacleContext;
+    if (boundaries && boundaries.length &&
+        _boundaryOverlapPenalty(selfSegs, boundaries, stripH).count > 0)
+      return true;
+    if (wallEdges && wallEdges.length &&
+        _wallEdgeOverlapPenalty(selfSegs, wallEdges).count > 0)
+      return true;
+    if (wireSegments && wireSegments.length) {
+      const wPen = _wireOverlapPenalty(selfSegs, placed, wireSegments);
+      if (wPen.parCount > 0) return true;
+    }
   }
   return false;
 }
 
-function _conflictedLeaderIndices(layout) {
+function _conflictedLeaderIndices(layout, obstacleContext) {
   const s = new Set();
   const n = layout.segs.length;
   for (let i = 0; i < n; i++) {
-    if (_leaderHasConflictAt(i, layout)) s.add(i);
+    if (_leaderHasConflictAt(i, layout, obstacleContext)) s.add(i);
   }
   return s;
 }
 
-/* ---- Wall-section boundary collision ---- */
+/* ---- Wall-section boundary collision ----
 
+   The boundary is a vertical line — the left or right edge of a wall
+   chunk.  A leader running alongside it must keep BOUNDARY_MIN_SEP
+   of air, and the angle gate admits segments up to ±45° from
+   vertical.  The average-distance criterion (not max) is what makes
+   a slanted leader count when it stays close over a stretch: an
+   exactly-vertical leader has a single constant distance, and a
+   30°-from-vertical leader varies over its length but its average
+   is still small when the whole segment hugs the boundary. */
 function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
   let count = 0, depth = 0;
   if (!boundaries || !boundaries.length) return { count, depth };
 
-  const SLOPE_MAX = 0.4;
+  /* Slope gate: catch any leader segment within 45° of vertical.
+     A vertical segment has slope |dx/dy| = 0; a 45° segment has
+     slope 1.0.  Beyond that the segment reads as diagonal, not as
+     running alongside a vertical line. */
+  const SLOPE_MAX = 1.0;
 
   for (const s of leaderSegs) {
     const dy = s.by - s.ay;
@@ -13329,11 +13441,11 @@ function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
 
     const dx = s.bx - s.ax;
     for (const bx of boundaries) {
-      if (s.maxX + SEG_MIN_SEP < bx) continue;
-      if (s.minX - SEG_MIN_SEP > bx) continue;
+      if (s.maxX + BOUNDARY_MIN_SEP < bx) continue;
+      if (s.minX - BOUNDARY_MIN_SEP > bx) continue;
 
       let sumDist = 0;
-      const N = 5;
+      const N = 8;
       for (let k = 0; k <= N; k++) {
         const y = yLo + (yHi - yLo) * k / N;
         const t = (y - s.ay) / dy;
@@ -13341,19 +13453,23 @@ function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
         sumDist += Math.abs(x - bx);
       }
       const avgDist = sumDist / (N + 1);
-      if (avgDist < SEG_MIN_SEP) {
+      if (avgDist < BOUNDARY_MIN_SEP) {
         count++;
-        depth += (SEG_MIN_SEP - avgDist);
+        depth += (BOUNDARY_MIN_SEP - avgDist);
       }
     }
   }
   return { count, depth };
 }
 
-/* ---- Cable-wire collision ---- */
+/* ---- Cable-wire collision ----
 
-const WIRE_ANCHOR_TRIM = 8.0;
-
+   A leader segment near a wire segment is a conflict.  The
+   distinction between a parallel pass and a crossing is made by
+   angle (WIRE_PARALLEL_TOL) and governs which separation threshold
+   applies: WIRE_MIN_SEP for parallel, SEG_MIN_SEP for crossing.
+   The parallel case is the one the user actually sees as an
+   overlap; the crossing case is unambiguous. */
 function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
   let count = 0, depth = 0;
   let parCount = 0, parDepth = 0;
@@ -13373,30 +13489,34 @@ function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
       const wminY = Math.min(w.ay, w.by);
       const wmaxY = Math.max(w.ay, w.by);
 
-      if (s.maxX + SEG_MIN_SEP < wminX) continue;
-      if (wmaxX + SEG_MIN_SEP < s.minX) continue;
-      if (s.maxY + SEG_MIN_SEP < wminY) continue;
-      if (wmaxY + SEG_MIN_SEP < s.minY) continue;
+      if (s.maxX + WIRE_MIN_SEP < wminX) continue;
+      if (wmaxX + WIRE_MIN_SEP < s.minX) continue;
+      if (s.maxY + WIRE_MIN_SEP < wminY) continue;
+      if (wmaxY + WIRE_MIN_SEP < s.minY) continue;
 
       const dAnchor = _pointSegDist(ax, ay, w.ax, w.ay, w.bx, w.by);
       if (dAnchor < WIRE_ANCHOR_TRIM) continue;
 
       const d = _segSegDist(s.ax, s.ay, s.bx, s.by,
                             w.ax, w.ay, w.bx, w.by);
-      if (d < SEG_MIN_SEP) {
+      const wAngle = Math.atan2(w.by - w.ay, w.bx - w.ax);
+      const angDiff = _angleDiff(sAngle, wAngle);
+
+      if (angDiff < WIRE_PARALLEL_TOL && d < WIRE_MIN_SEP) {
+        parCount++;
+        parDepth += (WIRE_MIN_SEP - d);
+        count++;
+        depth += (WIRE_MIN_SEP - d);
+      } else if (d < SEG_MIN_SEP) {
         count++;
         depth += (SEG_MIN_SEP - d);
-
-        const wAngle = Math.atan2(w.by - w.ay, w.bx - w.ax);
-        if (_angleDiff(sAngle, wAngle) < PARALLEL_TOL) {
-          parCount++;
-          parDepth += (SEG_MIN_SEP - d);
-        }
       }
     }
   }
   return { count, depth, parCount, parDepth };
 }
+
+const WIRE_ANCHOR_TRIM = 8.0;
 
 /* ---- Wall-edge collision ---- */
 
@@ -13452,8 +13572,7 @@ function _cornerFeature(it, placed, stripH, topPad, trackOffsets, which) {
   const basePath = computeLeaderPath(
     it.anchorCx, anchorY, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
-    it.startJog || 0);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
 
   if (basePath.length < 3) {
     const p = basePath[0] || [0, 0];
@@ -13598,9 +13717,7 @@ const OPT_MAX_PASSES  = 8;
    After the last band, descend at pillX to pillTopY.
 
    Both entry and exit are clamped to [chanY, pillTopY], and a band
-   whose clamp collapses is skipped entirely.  This is what keeps the
-   walk from producing up-down-up shapes when a band straddles either
-   endpoint.
+   whose clamp collapses is skipped entirely.
 
    Detour column
    -------------
@@ -13620,7 +13737,6 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
   const M = 4;
   const EPS = 2;
 
-  /* Foreign pill boxes that overlap the tail's own y-range. */
   const boxes = [];
   for (const Q of placed) {
     if (Q === self) continue;
@@ -13635,14 +13751,12 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     });
   }
 
-  /* Blockers: boxes whose x-range contains pillX. */
   const blockers = [];
   for (const b of boxes) {
     if (pillX >= b.qL - EPS && pillX <= b.qR + EPS) blockers.push(b);
   }
   if (!blockers.length) return [[pillX, pillTopY]];
 
-  /* Sort by top edge, merge into bands. */
   blockers.sort((a, b) => a.qT - b.qT);
   const bands = [];
   let cur = { qT: blockers[0].qT, qB: blockers[0].qB,
@@ -13660,8 +13774,6 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
   }
   bands.push(cur);
 
-  /* A horizontal at y from xa to xb is clear if no box overlaps
-     both its x-span and its y-position (within EPS). */
   const hClear = (y, xa, xb) => {
     const lo = Math.min(xa, xb), hi = Math.max(xa, xb);
     for (const b of boxes) {
@@ -13672,8 +13784,6 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     return true;
   };
 
-  /* A vertical at x from ya to yb is clear if no box overlaps both
-     its x-position and its y-span (within EPS). */
   const vClear = (x, ya, yb) => {
     const lo = Math.min(ya, yb), hi = Math.max(ya, yb);
     for (const b of boxes) {
@@ -13692,13 +13802,11 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     const exitY  = Math.min(pillTopY, band.qB + M);
     if (entryY >= exitY - 0.5) continue;
 
-    /* Descend at pillX from curY to entryY. */
     if (entryY > curY + 0.5) {
       out.push([pillX, entryY]);
       curY = entryY;
     }
 
-    /* Choose the detour column for this band. */
     const leftX  = band.qL - M;
     const rightX = band.qR + M;
     const preferRight = (rightX - pillX) < (pillX - leftX);
@@ -13737,24 +13845,19 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
 
 function computeLeaderPath(anchorX, anchorY, offA, chanY, pillX, pillTopY,
                            self, placed, stripBottom, topPad, trackOffsets,
-                           diveMode, startJog) {
+                           diveMode) {
   const mode = diveMode || 0;
-  const sj   = startJog || 0;
-  const ax   = anchorX + sj;
   const path = [];
   path.push([anchorX, anchorY]);
-
   if (mode === 1) {
-    if (sj !== 0) path.push([ax, anchorY]);
-    path.push([ax, chanY]);
-    path.push([pillX, chanY]);
+    path.push([anchorX, chanY]);
+    path.push([pillX,   chanY]);
   } else if (mode === 2) {
     path.push([pillX, anchorY]);
     path.push([pillX, chanY]);
   } else {
-    if (sj !== 0) path.push([ax, anchorY]);
-    path.push([ax + offA, chanY]);
-    path.push([pillX,     chanY]);
+    path.push([anchorX + offA, chanY]);
+    path.push([pillX,          chanY]);
   }
 
   const tail = _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
@@ -13770,8 +13873,7 @@ function _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets) {
   return computeLeaderPath(
     it.anchorCx, anchorY, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
-    it.startJog || 0);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
 }
 
 function _bevelPath(path, b0, b1) {
@@ -13848,12 +13950,13 @@ function _jogSegment(points, segIdx, shift) {
    (the direction of its own horizontal run — the sign of
    pillCenterX minus anchorCx minus offsetA), the path continues
    smoothly past the jog.  If the slide goes the other way, the path
-   reverses direction — the "bump" case.
+   reverses direction.
 
-   jog0 targets the first VERTICAL segment of the polyline, not
-   literally segment index 0, so a start jog and a jog0 can coexist:
-   the start jog adds a horizontal segment at index 0, and jog0 walks
-   past it to the anchor leg. */
+   _applyJogsToPath rejects a jog whose sign is opposite the direction
+   of the leader's own horizontal run.  The optimiser still tries the
+   same numeric candidates, but the ones that would create a back-step
+   produce an unchanged path, so the score does not improve and the
+   move is not selected. */
 
 function _applyJogsToPath(path, it) {
   let p = path;
@@ -13869,12 +13972,7 @@ function _applyJogsToPath(path, it) {
 
   if (it.jog0 && Math.abs(it.jog0) >= JOG_MIN_APPLY && p.length >= 2
       && jogAllowed(it.jog0)) {
-    for (let i = 0; i < p.length - 1; i++) {
-      if (Math.abs(p[i][0] - p[i + 1][0]) < 0.5) {
-        p = _jogSegment(p, i, it.jog0);
-        break;
-      }
-    }
+    p = _jogSegment(p, 0, it.jog0);
   }
   if (it.jog1 && Math.abs(it.jog1) >= JOG_MIN_APPLY && p.length >= 2
       && jogAllowed(it.jog1)) {
@@ -13924,35 +14022,44 @@ const CHANNEL_Y_STEPS = [
 
 const OFFSET_A_STEPS = [-8, -2, 2, 8];
 
-/* Start-jog pool.  Values are absolute target positions for
-   it.startJog; the optimiser also tries 0 (the natural value when no
-   jog is needed).  The magnitudes are all at least 8 px so a
-   successful move is guaranteed to clear SEG_MIN_SEP = 6 from any
-   boundary the anchor sits on. */
-const START_JOG_STEPS = [-20, -14, -8, 8, 14, 20];
-
 /* ==========================================================================
    LEADER GEOMETRY OPTIMISER
    ==========================================================================
-   Six move families, all tried in one pass.  Each candidate move is
+   Five move families, all tried in one pass.  Each candidate move is
    scored against the layout with the complete exhaustive tier list.
    Only strictly-improving moves are accepted.
 
-   The pass loop skips leaders with no conflict at all — in a typical
-   19-pill layout that is 2/3 of them. */
+   The pass loop skips leaders with no conflict at all.  "Conflict"
+   here means any conflict the SCORE charges for — segment-segment,
+   segment-pill, boundary, wall-edge, or parallel-wire.  The
+   conflictedLeaderIndices filter is built with the same obstacle
+   context the pill push uses, so the two agree on which leaders
+   matter. */
 function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                                 boundaries, wireSegments, wallEdges) {
   for (const it of placed) {
     it.bevel0 = 0; it.bevel1 = 0;
     it.jog0   = 0; it.jog1   = 0;
     it.diveMode = 0;
-    it.startJog = 0;
   }
   if (placed.length < 2) return;
 
   const bxs   = Array.isArray(boundaries)   ? boundaries   : [];
   const wires = Array.isArray(wireSegments) ? wireSegments : [];
   const wes   = Array.isArray(wallEdges)    ? wallEdges    : [];
+
+  /* The obstacle context: everything the conflicted-leader filter
+     needs to see boundary, wall-edge, and parallel-wire conflicts
+     the same way the score does.  Without this, a leader whose only
+     conflict is with a wall-section boundary is filtered out as
+     "clean" and no candidate move is ever tried for it. */
+  const obstacleContext = {
+    boundaries:   bxs,
+    wireSegments: wires,
+    wallEdges:    wes,
+    placed:       placed,
+    stripH:       stripH,
+  };
 
   function evaluate() {
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
@@ -14018,6 +14125,28 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           const t = _segBoxOverlap(s, expanded);
           if (t > 0) { pillCount++; pillDepth += t; }
         }
+      }
+    }
+
+    /* --- tier 1b: double crossings ---
+
+       A leader pair that crosses once is routing.  A pair that
+       crosses twice is weaving.  The extra crossings are counted
+       here and charged at a tier of their own, above the head
+       tier, so that the optimiser trades a second crossing for a
+       first crossing elsewhere rather than accumulating crossings
+       on a single pair.
+
+       The score term is `extraCrossings × DOUBLE_CROSS_EXTRA_W`,
+       where extraCrossings = Σ_pairs max(0, crossings(pair) − 1).
+       Independent single crossings are unaffected: a pair with one
+       crossing contributes zero here and its cost continues to be
+       the ordinary segment-segment tier below. */
+    let extraCrossings = 0;
+    for (let i = 0; i < pathSegs.length; i++) {
+      for (let j = i + 1; j < pathSegs.length; j++) {
+        const n = _countSegmentCrossings(pathSegs[i], pathSegs[j]);
+        if (n >= 2) extraCrossings += (n - 1);
       }
     }
 
@@ -14156,9 +14285,10 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
       pillCount    * 5e11 + pillDepth    * 5e10 +
       wireParCount * 1e11 + wireParDepth * 1e10 +
       weCount      * 1e11 + weDepth      * 1e10 +
+      bCount       * 1e11 + bDepth       * 1e10 +
       headCount    * 1e10 + headDepth    * 1e9  +
+      extraCrossings * DOUBLE_CROSS_EXTRA_W +
       segCount     * 1e9  + segDepth     * 1e8  +
-      bCount       * 1e9  + bDepth       * 1e8  +
       wireCount    * 1e9  + wireDepth    * 1e8  +
       cornerCount  * 1e6  + cornerDepth  * 1e5;
 
@@ -14170,7 +14300,11 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
 
   for (let pass = 0; pass < OPT_MAX_PASSES; pass++) {
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-    const conflicted = _conflictedLeaderIndices(layout);
+    /* Pass the obstacle context so the filter sees boundary,
+       wall-edge, and parallel-wire conflicts, exactly as the score
+       does.  Without it, a leader whose only conflict is with a
+       boundary is filtered out as clean and never given a chance. */
+    const conflicted = _conflictedLeaderIndices(layout, obstacleContext);
 
     let best = null;
 
@@ -14245,26 +14379,6 @@ function optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
           }
         }
       }
-
-      /* startJog: the candidate pool is absolute target values, plus
-         the natural 0.  Absolute rather than relative because the
-         jog either helps or it does not; there is no meaningful
-         "step" from one candidate to another. */
-      const curStart = it.startJog || 0;
-      const startCands = [0, ...START_JOG_STEPS];
-      for (const cand of startCands) {
-        if (cand === curStart) continue;
-        const saved = it.startJog;
-        it.startJog = cand;
-        const test = evaluate();
-        it.startJog = saved;
-
-        if (test.score < cur.score - 0.5) {
-          if (!best || test.score < best.test.score) {
-            best = { it, field: 'startJog', newValue: cand, test };
-          }
-        }
-      }
     }
 
     if (!best) break;
@@ -14284,15 +14398,12 @@ function buildPathSegsFor(it, placed, stripH, topPad, trackOffsets) {
   const base = computeLeaderPath(
     it.anchorCx, it.anchorCyRel, it.offsetA || 0,
     chanY, it.pillCenterX, pillTopY,
-    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0,
-    it.startJog || 0);
+    it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
   const path = _applyJogsToPath(
     _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0), it);
   return _pathSegments(path, -1, SEG_MIN_LEN);
 }
 
-/* Does the pill at index idx overlap, or come within PILL_PROX of,
-   any other pill in the same track? */
 function _pillHasSameTrackCollision(idx, placed) {
   const me = placed[idx];
   const myTrack = me.track;
@@ -14310,7 +14421,6 @@ function _pillHasSameTrackCollision(idx, placed) {
   return false;
 }
 
-/* One-time left-to-right separation per track. */
 function _separatePillsInTracks(placed) {
   const byTrack = new Map();
   for (let i = 0; i < placed.length; i++) {
@@ -14334,7 +14444,8 @@ function _separatePillsInTracks(placed) {
   }
 }
 
-function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
+function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets,
+                                     obstacleContext) {
   const PUSH = [];
   for (let d = 4; d <= 32; d += 4) { PUSH.push(d); PUSH.push(-d); }
 
@@ -14348,7 +14459,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
     for (let li = 0; li < placed.length; li++) {
       const it = placed[li];
       let layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-      const before = _countConflictsAt(li, layout);
+      const before = _countConflictsAt(li, layout, obstacleContext);
       if (before === 0) continue;
 
       const origX = it.pillCenterX;
@@ -14357,7 +14468,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
         it.pillCenterX = origX + dX;
         if (_pillHasSameTrackCollision(li, placed)) continue;
         layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-        const n = _countConflictsAt(li, layout);
+        const n = _countConflictsAt(li, layout, obstacleContext);
         if (n < bestN) { bestN = n; bestX = origX + dX; }
       }
       it.pillCenterX = bestX;
@@ -14387,12 +14498,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
 
           if (!cflt) {
             const box = layout.boxes[j];
-            const expanded = {
-              qL: box.qL - PILL_PROX,
-              qR: box.qR + PILL_PROX,
-              qT: box.qT - PILL_PROX,
-              qB: box.qB + PILL_PROX,
-            };
+            const expanded = _expandBox(box, PILL_PROX);
             for (const s of selfSegs) {
               if (s.maxX < expanded.qL || s.minX > expanded.qR) continue;
               if (s.maxY < expanded.qT || s.minY > expanded.qB) continue;
@@ -14411,7 +14517,7 @@ function pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets) {
             foreign.pillCenterX = fOrigX + dX;
             if (_pillHasSameTrackCollision(j, placed)) continue;
             layout = _buildLayout(placed, stripH, topPad, trackOffsets);
-            const n = _countConflictsAt(li, layout);
+            const n = _countConflictsAt(li, layout, obstacleContext);
             if (n < fBestN) { fBestN = n; fBestX = fOrigX + dX; }
           }
           foreign.pillCenterX = fBestX;
@@ -14431,10 +14537,18 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
                             boundaries, wireSegments, wallEdges) {
   const MAX_ROUNDS = 6;
 
+  const obstacleContext = {
+    boundaries:   boundaries   || [],
+    wireSegments: wireSegments || [],
+    wallEdges:    wallEdges    || [],
+    placed:       placed,
+    stripH:       stripH,
+  };
+
   const initialLayout = _buildLayout(placed, stripH, topPad, trackOffsets);
   let prev = 0;
   for (let i = 0; i < placed.length; i++) {
-    prev += _countConflictsAt(i, initialLayout);
+    prev += _countConflictsAt(i, initialLayout, obstacleContext);
   }
   prev = Math.floor(prev / 2);
   if (prev === 0) return;
@@ -14442,12 +14556,13 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
   for (let round = 0; round < MAX_ROUNDS; round++) {
     optimizeLeaderGeometry(placed, stripH, topPad, trackOffsets,
                            boundaries, wireSegments, wallEdges);
-    pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets);
+    pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets,
+                                obstacleContext);
 
     const layout = _buildLayout(placed, stripH, topPad, trackOffsets);
     let now = 0;
     for (let i = 0; i < placed.length; i++) {
-      now += _countConflictsAt(i, layout);
+      now += _countConflictsAt(i, layout, obstacleContext);
     }
     now = Math.floor(now / 2);
 
@@ -15027,8 +15142,7 @@ function drawVertexLabels(c, placement, stripY, stripH) {
 
     const basePath = computeLeaderPath(
       anchorX, anchorY, offA, chanY, pillX, pillTopY,
-      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0,
-      it.startJog || 0);
+      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
 
     const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
     const path = _applyJogsToPath(bevelled, it);
