@@ -52,11 +52,11 @@ one well-formed block.  Translators translate it as one piece.
 
 Concatenation order
 -------------------
-This module's I18N_JS is prepended to LIVE_JS in pg_live.py, so it
+This module's I18N_JS is prepended to LIVE_JS in cable_live.py, so it
 is the first thing the playground's <script> tag defines after the
 GEOMETRY const.  Every other live module can therefore call T(key)
 at parse time (inside a const initialiser) as well as at call time.
-pg_export.py — concatenated after LIVE_JS by playground_html.py —
+pg_export.py — concatenated after LIVE_JS by cable_html.py —
 sees the same T() and reads the same table; it carries no translation
 machinery of its own.
 """

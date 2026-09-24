@@ -1,5 +1,5 @@
 """
-room_geometry.py — extract wall geometry from room.step + room_walls.json.
+cable_geometry.py — extract wall geometry from room.step + room_walls.json.
 
 Reads the STEP model produced by room.py and the sidecar room_walls.json
 and returns a `geom` dict:

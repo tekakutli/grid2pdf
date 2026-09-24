@@ -2,7 +2,7 @@
 boxes_live.py — aggregator for the boxes playground's JS half.
 
 Eight submodules, each a Python string, concatenated into one <script>
-scope.  Same flat-scope discipline as the cable project's pg_live.py:
+scope.  Same flat-scope discipline as the cable project's cable_live.py:
 same functions, same names, same call sites as a monolithic file.
 
 Order matters.  bx_i18n declares the translation table and the T()

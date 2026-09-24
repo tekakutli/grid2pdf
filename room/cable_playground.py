@@ -7,9 +7,9 @@ cable_playground.py — plan cable / pipe routes in a room.
 
 This module is the entry point.  The heavy lifting lives in:
 
-    room_geometry      — STEP + room_walls.json → a geometry dict
-    playground_html    — the HTML/JS bundle, rendered with the geometry
-    playground_server  — a tiny threaded HTTP server with /save
+    cable_geometry     — STEP + room_walls.json → a geometry dict
+    cable_html         — the HTML/JS bundle, rendered with the geometry
+    cable_server       — a tiny threaded HTTP server with /save
     quiet              — stderr suppression around build123d calls
 
 Data model (used by the browser-side JS)
@@ -52,9 +52,9 @@ Legacy 'wall' anchors from v1/v2/v3 saves are upgraded to wall-edge on load.
 
 import os
 
-import room_geometry
-import playground_html
-import playground_server
+import cable_geometry
+import cable_html
+import cable_server
 
 
 HTML_FILE    = "cable_playground.html"
@@ -65,9 +65,9 @@ OPEN_BROWSER = True
 
 
 def main():
-    geom = room_geometry.extract_geometry()
+    geom = cable_geometry.extract_geometry()
 
-    html = playground_html.render(geom)
+    html = cable_html.render(geom)
     with open(HTML_FILE, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -93,7 +93,7 @@ def main():
 
     if SERVE:
         print()
-        playground_server.serve(
+        cable_server.serve(
             port         = PORT,
             open_browser = OPEN_BROWSER,
             html_file    = HTML_FILE,

@@ -1,10 +1,10 @@
 """
-playground_html.py — assembles the HTML/JS bundle from pg_core + pg_live
+cable_html.py — assembles the HTML/JS bundle from pg_core + cable_live
 + pg_arrows + pg_export.
 
 pg_core.py    holds everything that defines the model, the storage format,
               and the passive infrastructure.
-pg_live.py    holds everything interactive.
+cable_live.py    holds everything interactive.
 pg_arrows.py  holds the wall→plan escape-arrow field.
 pg_export.py  holds the printable cable-run diagram exporter.
 
@@ -18,7 +18,7 @@ knob that drives both playgrounds' fonts.
 import json
 
 from pg_core          import HTML_HEAD, CORE_JS, BOOT_JS, HTML_TAIL
-from pg_live          import LIVE_JS
+from cable_live       import LIVE_JS
 from pg_arrows        import ARROWS_JS
 from pg_export        import EXPORT_JS
 from playground_fonts import FONT_JS, inject_head

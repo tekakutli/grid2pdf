@@ -1,7 +1,7 @@
 """
 boxes_server.py — threaded HTTP server for the boxes playground.
 
-Same shape as playground_server.py in the cable project: serves the
+Same shape as cable_server.py in the cable project: serves the
 current directory, accepts POST /save with a JSON body (writes to
 boxes_file), and POST /print with a JSON body (formats a table to the
 terminal).  Disables caching for any *.json so a reload always sees the

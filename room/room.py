@@ -517,7 +517,7 @@ def _wire_to_polygon(wire, tol=0.01):
     Returns an empty list if the wire has fewer than three vertices.
     The trace walks the edges, always following the free end, and
     drops a duplicated closing point.  This is the same routine the
-    cable project's room_geometry.py uses; it is reimplemented here so
+    cable project's cable_geometry.py uses; it is reimplemented here so
     room.py does not depend on that module."""
     edges = list(wire.edges())
     if not edges:

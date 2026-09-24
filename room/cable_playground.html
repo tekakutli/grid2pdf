@@ -7356,7 +7356,7 @@ function updateRulerButton() {
 
 /* ---- Ruler keys -----------------------------------------------------
    Registered as a CAPTURE-phase listener on the window so it fires
-   before pg_core's and pg_live's bubble-phase listeners on the same
+   before pg_core's and cable_live's bubble-phase listeners on the same
    element.  In particular:
 
      • Backspace must pop a ruler measurement, not delete a selected
@@ -15453,7 +15453,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
                                      orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
   const FONT  = "700 12px " + FONT_MONO;
-  const PAD_X = 6, PAD_Y = 4, LINE_H = 14;
+  const PAD_X = 8, PAD_Y = 4, LINE_H = 14;
   const TRACK_GAP_X   = 10;
   const TRACK_V_GAP   = 8;
   const GROUP_TOL     = 8;
@@ -16001,6 +16001,12 @@ function drawVertexLabels(c, placement, stripY, stripH) {
   const pillTopYFor = (it) =>
     stripBottom + topPad + trackOffsets[it.track];
 
+  /* Same font the placement pass measured against.  Without this the
+     text is drawn in whatever font the caller last set — usually the
+     subtitle's 13 px / 600-weight stack — and a right-aligned label
+     overflows the pill's right edge by a few pixels. */
+  c.font = "700 12px " + FONT_MONO;
+
   for (const it of placed) {
     const pillTopY = pillTopYFor(it);
     const rx = it.pillCenterX - it.w / 2;
@@ -16451,8 +16457,6 @@ function renderCableRunToCanvas(tcId) {
       c.stroke();
       drawBadge(c, cx, by, entry.order);
     }
-
-    drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
 
     c.font = "700 18px " + FONT_SANS;
     c.fillStyle = "#333333";
@@ -16912,6 +16916,17 @@ function renderCableRunToCanvas(tcId) {
     }
   }
   c.setLineDash([]);
+
+  /* Vertex labels paint last so the cross-view wires never run
+     through a pill.  The pills have opaque white plates (fillRect
+     in drawVertexLabels), so drawing them here occludes every
+     wire segment that would otherwise cross a pill's text.  The
+     leader lines that connect each pill back to its strip anchor
+     are drawn in the same pass, which puts them on top of the
+     wires too — same z-rule, same reason. */
+  if (stripActive) {
+    drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
+  }
 
   const cropped = cropCanvasToContent(cv, 14 * DPR);
   const canvas = scaleCanvasToWidth(cropped, 2200);

@@ -179,7 +179,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
                                      orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
   const FONT  = "700 12px " + FONT_MONO;
-  const PAD_X = 6, PAD_Y = 4, LINE_H = 14;
+  const PAD_X = 8, PAD_Y = 4, LINE_H = 14;
   const TRACK_GAP_X   = 10;
   const TRACK_V_GAP   = 8;
   const GROUP_TOL     = 8;
@@ -726,6 +726,12 @@ function drawVertexLabels(c, placement, stripY, stripH) {
 
   const pillTopYFor = (it) =>
     stripBottom + topPad + trackOffsets[it.track];
+
+  /* Same font the placement pass measured against.  Without this the
+     text is drawn in whatever font the caller last set — usually the
+     subtitle's 13 px / 600-weight stack — and a right-aligned label
+     overflows the pill's right edge by a few pixels. */
+  c.font = "700 12px " + FONT_MONO;
 
   for (const it of placed) {
     const pillTopY = pillTopYFor(it);

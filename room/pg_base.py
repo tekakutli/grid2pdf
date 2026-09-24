@@ -2,7 +2,7 @@
 pg_base.py — palette, constants, textures, primitives, and the shared
 extended view state.
 
-The lowest layer of pg_live's twelve-module split: everything that
+The lowest layer of cable_live's twelve-module split: everything that
 other modules read but do not own.  Nothing here depends on any other
 live module; everything else depends on this one.
 

@@ -396,8 +396,6 @@ function renderCableRunToCanvas(tcId) {
       drawBadge(c, cx, by, entry.order);
     }
 
-    drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
-
     c.font = "700 18px " + FONT_SANS;
     c.fillStyle = "#333333";
     c.textAlign = "center"; c.textBaseline = "middle";
@@ -856,6 +854,17 @@ function renderCableRunToCanvas(tcId) {
     }
   }
   c.setLineDash([]);
+
+  /* Vertex labels paint last so the cross-view wires never run
+     through a pill.  The pills have opaque white plates (fillRect
+     in drawVertexLabels), so drawing them here occludes every
+     wire segment that would otherwise cross a pill's text.  The
+     leader lines that connect each pill back to its strip anchor
+     are drawn in the same pass, which puts them on top of the
+     wires too — same z-rule, same reason. */
+  if (stripActive) {
+    drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
+  }
 
   const cropped = cropCanvasToContent(cv, 14 * DPR);
   const canvas = scaleCanvasToWidth(cropped, 2200);

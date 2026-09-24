@@ -1175,7 +1175,7 @@ function updateRulerButton() {
 
 /* ---- Ruler keys -----------------------------------------------------
    Registered as a CAPTURE-phase listener on the window so it fires
-   before pg_core's and pg_live's bubble-phase listeners on the same
+   before pg_core's and cable_live's bubble-phase listeners on the same
    element.  In particular:
 
      • Backspace must pop a ruler measurement, not delete a selected

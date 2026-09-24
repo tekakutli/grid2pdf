@@ -3,8 +3,8 @@ pg_arrows.py — aggregator for the wall→plan escape-arrow field.
 
 This file is the aggregator.  The arrow field was originally a single
 ~3400-line module; it has been split into twelve submodules by
-concern, mirroring the split pg_live.py uses for the interactive half
-of the playground:
+concern, mirroring the split cable_live.py uses for the interactive
+half of the playground:
 
     pg_arrows_tuning    every tuning constant the solver reads, the
                         base-value frozen table, and the two module-

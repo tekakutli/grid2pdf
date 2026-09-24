@@ -7,7 +7,7 @@ transforms, focus mode, true-cable grouping, save/load.  This file is not
 expected to change as features are added to the playground.
 
 The interactive half — rendering decisions, drawing gestures, event
-handlers, snap policy — lives in pg_live.py and is expected to be
+handlers, snap policy — lives in cable_live.py and is expected to be
 rewritten whenever we iterate on the playground's UX.
 
 Translation
@@ -23,7 +23,7 @@ The four runtime strings in CORE_JS itself — the snap pill's two states,
 the draw button's two labels, the two save-flash messages, and the clear
 confirmation — route through T().  See those functions below.
 
-Assumed by pg_live.js (all defined here):
+Assumed by cable_live (all defined here):
     model        — anchors, makeAnchor, resolveSpecToAnchorId
     geometry     — WALL, WALL_HEIGHT, wallAttachToPlan/U, uToWallAttach,
                    nearestSegmentToUV, findSegmentAtU
@@ -40,7 +40,7 @@ Assumed by pg_live.js (all defined here):
     ui           — addFloorNsGrid, addWallVGrid, ..., updateDrawButton,
                    flashStatus
 
-Called BY pg_core.js but defined in pg_live.js (forward references are
+Called BY pg_core but defined in cable_live (forward references are
 resolved at call time, not parse time):
     draw, finishDraw, deleteSelectedCable, deleteSelectedVertex,
     beginDraw, cancelDraw, fitViews, T

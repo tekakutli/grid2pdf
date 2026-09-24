@@ -24,7 +24,7 @@ footprint.  It carries:
     • openings (doors, windows) as holes in the wall region,
     • small-room walls merged with the main-room walls where they meet.
 
-The cable playground's room_geometry.py takes exactly this approach,
+The cable playground's cable_geometry.py takes exactly this approach,
 except it computes the section on the fly from room.step.  By moving
 the section into room.py's output, the boxes playground gets the same
 geometry without depending on the STEP file at runtime.

@@ -1,5 +1,5 @@
 """
-playground_server.py — threaded HTTP server for the cable playground.
+cable_server.py — threaded HTTP server for the cable playground.
 
 Serves files from the current working directory and accepts POST /save with
 a JSON body, which it writes to `state_file`.  Disables caching for any

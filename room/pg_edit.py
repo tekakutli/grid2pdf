@@ -1,5 +1,5 @@
 """
-pg_cable_edit.py — cable lifecycle: draw, delete, drag, hit test.
+pg_edit.py — cable lifecycle: draw, delete, drag, hit test.
 
 The interaction layer for cables.  Owns:
 
