@@ -56,6 +56,7 @@ const PILL_PROX = SEG_MIN_SEP;
 
 const BOUNDARY_MIN_SEP = 10.0;
 const WIRE_MIN_SEP = 10.0;
+const WIRE_APPROACH_SEP = 26.0;
 const WIRE_PARALLEL_TOL = Math.PI / 6;
 
 const PARALLEL_TOL = Math.PI / 12;

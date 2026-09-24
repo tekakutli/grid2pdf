@@ -211,9 +211,11 @@ let panelLastActivity = 0;
                      against the surrounding strip, still sparse
                      enough that the wall's own dimension rules and
                      z_hi dashes show through it.
-     voidHatch     — the wall band behind the chunks.  Faint enough
-                     that the chunks sitting on it carry all the
-                     contrast.
+     voidHatch     — the wall band behind the chunks.  Matches the
+                     crossHatch brightness so the "no wall here"
+                     symbology reads as strongly as the wall-under-
+                     cursor highlight, instead of fading into the
+                     strip.
      planInterior  — the floor plan interior fill.  The lightest of
                      the three: a texture, not a highlight. */
 
@@ -240,7 +242,7 @@ function _screenPattern(kind) {
       p.moveTo(-1, -1);    p.lineTo(s + 1, s + 1);
       p.stroke();
     }],
-    voidHatch: [12, "rgba(220, 230, 242, 0.14)", 0.45, (p, s) => {
+    voidHatch: [12, "rgba(220, 230, 242, 0.72)", 0.6, (p, s) => {
       p.beginPath();
       p.moveTo(s + 1, -1); p.lineTo(-1, s + 1);
       p.stroke();

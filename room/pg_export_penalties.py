@@ -6,26 +6,24 @@ list, for the corner feature) plus its own obstacle set, and returns
 a { count, depth } pair or the parallel/crossing split.
 
     _boundaryOverlapPenalty   a leader leg running alongside a
-                              wall-section boundary (the vertical
-                              edge between two wall chunks in the
-                              strip).  Angle gate is ±45° from
-                              vertical: a leader up to that far off
-                              still reads as "running alongside" a
-                              vertical boundary for a stretch.
-                              Threshold BOUNDARY_MIN_SEP = 10 px,
-                              wider than the segment-vs-segment
-                              threshold, because a boundary is a
-                              semantic partition of the strip.
+                              wall-section boundary.  Angle gate is
+                              ±45° from vertical; threshold
+                              BOUNDARY_MIN_SEP = 10 px.
 
     _wireOverlapPenalty       a leader leg running alongside or
-                              crossing the cable wire.  Parallel
-                              contacts are caught with a wider
-                              angle window (WIRE_PARALLEL_TOL = 30°)
-                              and a wider separation
-                              (WIRE_MIN_SEP = 10 px) than crossings.
-                              A leader that merely crosses the wire
-                              is unambiguously distinguishable; a
-                              leader that runs alongside it is not.
+                              crossing the cable wire.  Two hard
+                              sub-tiers and one soft sub-tier:
+
+                                hard parallel   within WIRE_MIN_SEP,
+                                                angle within
+                                                WIRE_PARALLEL_TOL
+                                hard crossing   within SEG_MIN_SEP
+                                                (any angle)
+                                soft parallel   within
+                                                WIRE_APPROACH_SEP,
+                                                angle within
+                                                WIRE_PARALLEL_TOL.
+                                                Tiebreaker weight.
 
     _wallEdgeOverlapPenalty   a near-horizontal leader leg running
                               alongside a wall chunk's top or bottom
@@ -33,6 +31,28 @@ a { count, depth } pair or the parallel/crossing split.
 
     _cornerFeature / _cornerDist
                               the bevel-cut region of each leader.
+
+Anchor-proximity exemption — the guard is on segment LENGTH
+-----------------------------------------------------------
+A leader's anchor sits on the wire by construction, so a plain
+seg-seg distance from a leader segment to the wire always reports
+zero when the leader touches its own anchor.
+
+The exemption is: if the leader segment has an endpoint at the
+anchor (within WIRE_ANCHOR_TRIM), use the OTHER endpoint's distance
+to the wire instead of the seg-seg distance.  This distinguishes
+"touches the wire at the anchor, then diverges" (large far-end
+distance, no conflict) from "runs alongside the wire away from
+the anchor" (small far-end distance, conflict).
+
+An earlier revision added a second guard — skip if the far endpoint
+is also within WIRE_ANCHOR_TRIM.  That was wrong: it re-exempted the
+exact case the far-endpoint rule exists to detect (a long segment
+from the anchor to a point 6 px off the wire is a genuine hug, not a
+degenerate stub).  The correct stub guard is on the segment's own
+LENGTH: a segment shorter than WIRE_ANCHOR_TRIM that also touches
+the anchor is a degenerate stub and is skipped; anything longer is
+evaluated by its far endpoint.
 
 The tier weights themselves live in evaluate() in
 pg_export_optimizer.py, not here.  This module computes the raw
@@ -96,17 +116,19 @@ function _boundaryOverlapPenalty(leaderSegs, boundaries, stripH) {
 
 /* ---- Cable-wire collision ----
 
-   A leader segment near a wire segment is a conflict.  The
-   distinction between a parallel pass and a crossing is made by
-   angle (WIRE_PARALLEL_TOL) and governs which separation threshold
-   applies: WIRE_MIN_SEP for parallel, SEG_MIN_SEP for crossing.
-   The parallel case is the one the user actually sees as an
-   overlap; the crossing case is unambiguous. */
+   See the module docstring for the anchor-proximity rule.  The
+   stub guard is on segment LENGTH, not on the far endpoint's
+   distance to the wire: a segment shorter than WIRE_ANCHOR_TRIM
+   that touches the anchor is a genuine stub and is skipped; a
+   longer segment from the anchor to a point 6 px off the wire is
+   exactly the "leader hugs the wire" case and MUST fire. */
 function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
   let count = 0, depth = 0;
   let parCount = 0, parDepth = 0;
+  let approachCount = 0, approachDepth = 0;
   if (!wireSegments || !wireSegments.length)
-    return { count, depth, parCount, parDepth };
+    return { count, depth, parCount, parDepth,
+             approachCount, approachDepth };
 
   for (const s of leaderSegs) {
     const it = placed[s.pathIdx];
@@ -115,37 +137,61 @@ function _wireOverlapPenalty(leaderSegs, placed, wireSegments) {
     const ay = it.anchorCyRel;
     const sAngle = s.angle;
 
+    /* Distance from the leader segment's endpoints to the anchor. */
+    const dA = Math.hypot(s.ax - ax, s.ay - ay);
+    const dB = Math.hypot(s.bx - ax, s.by - ay);
+    const nearAnchor = Math.min(dA, dB) < WIRE_ANCHOR_TRIM;
+    const farPt = dA > dB ? [s.ax, s.ay] : [s.bx, s.by];
+
+    /* Stub guard: a leader segment that touches the anchor AND is
+       shorter than WIRE_ANCHOR_TRIM is degenerate.  Skip it.  Any
+       longer segment is evaluated normally, even if its far
+       endpoint happens to be close to the wire — that IS the case
+       this penalty exists to detect. */
+    const segLen = Math.hypot(s.bx - s.ax, s.by - s.ay);
+    if (nearAnchor && segLen < WIRE_ANCHOR_TRIM) continue;
+
     for (const w of wireSegments) {
       const wminX = Math.min(w.ax, w.bx);
       const wmaxX = Math.max(w.ax, w.bx);
       const wminY = Math.min(w.ay, w.by);
       const wmaxY = Math.max(w.ay, w.by);
 
-      if (s.maxX + WIRE_MIN_SEP < wminX) continue;
-      if (wmaxX + WIRE_MIN_SEP < s.minX) continue;
-      if (s.maxY + WIRE_MIN_SEP < wminY) continue;
-      if (wmaxY + WIRE_MIN_SEP < s.minY) continue;
+      if (s.maxX + WIRE_APPROACH_SEP < wminX) continue;
+      if (wmaxX + WIRE_APPROACH_SEP < s.minX) continue;
+      if (s.maxY + WIRE_APPROACH_SEP < wminY) continue;
+      if (wmaxY + WIRE_APPROACH_SEP < s.minY) continue;
 
-      const dAnchor = _pointSegDist(ax, ay, w.ax, w.ay, w.bx, w.by);
-      if (dAnchor < WIRE_ANCHOR_TRIM) continue;
+      let d;
+      if (nearAnchor) {
+        d = _pointSegDist(farPt[0], farPt[1], w.ax, w.ay, w.bx, w.by);
+      } else {
+        d = _segSegDist(s.ax, s.ay, s.bx, s.by,
+                        w.ax, w.ay, w.bx, w.by);
+      }
 
-      const d = _segSegDist(s.ax, s.ay, s.bx, s.by,
-                            w.ax, w.ay, w.bx, w.by);
       const wAngle = Math.atan2(w.by - w.ay, w.bx - w.ax);
       const angDiff = _angleDiff(sAngle, wAngle);
 
       if (angDiff < WIRE_PARALLEL_TOL && d < WIRE_MIN_SEP) {
+        /* hard parallel tier */
         parCount++;
         parDepth += (WIRE_MIN_SEP - d);
         count++;
         depth += (WIRE_MIN_SEP - d);
+      } else if (angDiff < WIRE_PARALLEL_TOL && d < WIRE_APPROACH_SEP) {
+        /* soft parallel tier */
+        approachCount++;
+        approachDepth += (WIRE_APPROACH_SEP - d);
       } else if (d < SEG_MIN_SEP) {
+        /* crossing tier */
         count++;
         depth += (SEG_MIN_SEP - d);
       }
     }
   }
-  return { count, depth, parCount, parDepth };
+  return { count, depth, parCount, parDepth,
+           approachCount, approachDepth };
 }
 
 const WIRE_ANCHOR_TRIM = 8.0;

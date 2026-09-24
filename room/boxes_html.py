@@ -22,15 +22,17 @@ it ran.
 
 import json
 
-from boxes_panel import HTML_HEAD, BOOT_JS, HTML_TAIL
-from boxes_live  import LIVE_JS
+from boxes_panel     import HTML_HEAD, BOOT_JS, HTML_TAIL
+from boxes_live      import LIVE_JS
+from playground_fonts import FONT_JS, inject_head
 
 
 def render(geom):
     return (
-        HTML_HEAD
+        inject_head(HTML_HEAD)
         + "<script>\n"
         + '"use strict";\n'
+        + FONT_JS
         + "const GEOMETRY = "
         + json.dumps(geom, separators=(",", ":"))
         + ";\n"
