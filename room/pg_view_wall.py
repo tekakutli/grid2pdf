@@ -320,7 +320,7 @@ function drawWallView() {
   if (focusSavedU && focusSeg >= 0) {
     const seg = WALL.segments[focusSeg];
     const tag = (seg && seg.tag) ? seg.tag : ("segment " + (focusSeg + 1));
-    ctx.font = "700 11px ui-monospace, monospace";
+    ctx.font = "700 11px " + FONT_MONO;
     ctx.fillStyle = PALETTE.ink;
     ctx.textAlign = "left"; ctx.textBaseline = "bottom";
     ctx.fillText("FOCUS  ·  " + tag + "  ·  neighbours shown adjacent",
@@ -347,7 +347,7 @@ function drawWallView() {
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.font = "600 9px ui-monospace, monospace";
+    ctx.font = "600 9px " + FONT_MONO;
 
     for (let i = 0; i < proj.length; i++) {
       const p = proj[i];
@@ -409,7 +409,7 @@ function drawWallRulers() {
   const MAX_ROWS = 8;
   const stripTopY = viewWall.stripTopY;
 
-  ctx.font = `600 ${FS}px ui-monospace, monospace`;
+  ctx.font = `600 ${FS}px ${FONT_MONO}`;
 
   const items = [];
   for (const fp of WALL.footprints) {
@@ -470,7 +470,7 @@ function drawWallRulers() {
   ctx.restore();
 
   ctx.save();
-  ctx.font = `600 ${FS}px ui-monospace, monospace`;
+  ctx.font = `600 ${FS}px ${FONT_MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   for (const it of items) {

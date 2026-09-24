@@ -216,7 +216,7 @@ function drawVertexBalloons(view) {
   }
 
   ctx.save();
-  ctx.font = "700 10px ui-monospace, monospace";
+  ctx.font = "700 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 

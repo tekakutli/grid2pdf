@@ -92,7 +92,7 @@ function drawHoverCallout() {
   }
 
   ctx.save();
-  ctx.font = "600 11px ui-monospace, monospace";
+  ctx.font = "600 11px " + FONT_MONO;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   const tw = ctx.measureText(text).width;
@@ -157,7 +157,7 @@ function drawMarginTicks(cw, ch) {
   while (stepX * pxPerMmX < 40) stepX *= 2;
 
   ctx.save();
-  ctx.font = "600 9px ui-monospace, monospace";
+  ctx.font = "600 9px " + FONT_MONO;
   ctx.fillStyle = PALETTE.inkFaint;
   ctx.strokeStyle = PALETTE.inkFaint;
   ctx.lineWidth = 0.8;
@@ -212,7 +212,7 @@ function drawSectionRibbon(cw) {
   const pad = 14;
 
   ctx.save();
-  ctx.font = "600 10px ui-monospace, monospace";
+  ctx.font = "600 10px " + FONT_MONO;
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
 
@@ -253,7 +253,7 @@ const NOTE_MAX_W = 220;
 function drawNotes(view) {
   if (!NOTES.length) return;
   ctx.save();
-  ctx.font = "600 11px ui-monospace, monospace";
+  ctx.font = "600 11px " + FONT_MONO;
   ctx.textBaseline = "middle";
 
   for (const note of NOTES) {

@@ -527,9 +527,9 @@ function renderFloorPlanPNG() {
     if (fs < MIN_FONT) continue;
     for (let tries = 0; tries < 15; tries++) {
       const dimFS = fs * 0.82;
-      g.font = `600 ${fs}px ui-monospace, monospace`;
+      g.font = `600 ${fs}px ${FONT_MONO}`;
       const nameW = hasName ? g.measureText(nameStr).width : 0;
-      g.font = `500 ${dimFS}px ui-monospace, monospace`;
+      g.font = `500 ${dimFS}px ${FONT_MONO}`;
       const wW = g.measureText(wStr).width;
       const hW = g.measureText(hStr).width;
       const margin = 2.2 * dimFS;
@@ -564,7 +564,7 @@ function renderFloorPlanPNG() {
       const nameDeg = nameTextAngleDeg(sc);
       const nameRad = nameDeg * Math.PI / 180;
 
-      g.font = `600 ${fs.toFixed(1)}px ui-monospace, monospace`;
+      g.font = `600 ${fs.toFixed(1)}px ${FONT_MONO}`;
       const nameW = g.measureText(nameStr).width;
       const plateW = nameW + fs * 0.3;
       const plateH = fs * 1.24;
@@ -597,7 +597,7 @@ function renderFloorPlanPNG() {
       if (ang >  Math.PI / 2) ang -= Math.PI;
       if (ang < -Math.PI / 2) ang += Math.PI;
 
-      g.font = `500 ${dimFS.toFixed(1)}px ui-monospace, monospace`;
+      g.font = `500 ${dimFS.toFixed(1)}px ${FONT_MONO}`;
       const tw = g.measureText(wStr).width;
       const plateW = tw + dimFS * 0.3;
       const plateH = dimFS * 1.24;
@@ -630,7 +630,7 @@ function renderFloorPlanPNG() {
       if (ang >  Math.PI / 2) ang -= Math.PI;
       if (ang < -Math.PI / 2) ang += Math.PI;
 
-      g.font = `500 ${dimFS.toFixed(1)}px ui-monospace, monospace`;
+      g.font = `500 ${dimFS.toFixed(1)}px ${FONT_MONO}`;
       const tw = g.measureText(hStr).width;
       const plateW = tw + dimFS * 0.3;
       const plateH = dimFS * 1.24;
@@ -737,7 +737,7 @@ function renderFloorPlanPNG() {
     /* W and H dimension numbers as labels.  Anchored to their own
        dimension lines, reading along them. */
     {
-      g.font = `500 ${numFS.toFixed(1)}px ui-monospace, monospace`;
+      g.font = `500 ${numFS.toFixed(1)}px ${FONT_MONO}`;
       const wTw = g.measureText(wStr).width;
       const hTw = g.measureText(hStr).width;
 
@@ -791,7 +791,7 @@ function renderFloorPlanPNG() {
     const absC = Math.abs(Math.cos(nameRad));
     const absS = Math.abs(Math.sin(nameRad));
 
-    g.font = `600 ${outFS.toFixed(1)}px ui-monospace, monospace`;
+    g.font = `600 ${outFS.toFixed(1)}px ${FONT_MONO}`;
     const textW = g.measureText(nameStr).width;
     const textH = outFS * 1.15;
     const plateW = textW + outFS * 0.3;
@@ -890,7 +890,7 @@ function renderFloorPlanPNG() {
     g.fillStyle = "#000000";
     g.font = `${L.kind === "inside-name" || L.kind === "outside-name"
                  ? "600" : "500"
-              } ${L.fontSize.toFixed(1)}px ui-monospace, monospace`;
+              } ${L.fontSize.toFixed(1)}px ${FONT_MONO}`;
     g.textAlign = "center";
     g.textBaseline = "middle";
     g.fillText(L.text, 0, 0);

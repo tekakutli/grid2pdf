@@ -29,13 +29,156 @@ pills and the leaders are drawn in the same pass.
 
 
 LABELS_JS = r"""
+/* ==========================================================================
+   OVERHANG-HUGGING FINAL PASS
+   ==========================================================================
+
+   The optimiser's offsetA, detourBias, bevel, and jog moves can push a
+   leader's intermediate geometry past the strip band's horizontal
+   edges — offsetA alone reaches ±240 px, and a jog applied on top of an
+   already-out-of-band joint can put a vertical rule hundreds of pixels
+   outside [stripAreaX0, stripAreaX1].  The canvas clips the overflow
+   silently, so the exported PNG shows the leader truncated on the
+   right.
+
+   This pass runs AFTER the polish loop and leaves the optimiser's
+   decisions alone everywhere they fit.  Only the offending leaders are
+   reshaped.  The endpoints are never touched: pillX is clamped to the
+   band by the pill-placing code above, and anchorCx is inside the
+   strip.  What is clamped is the interior geometry.
+
+   Leaders that overhang the same edge are given different "hugging
+   depths" — lane 0 hugs HUG_MARGIN px from the edge, lane 1 hugs
+   HUG_MARGIN + HUG_LANE_STEP, and so on — so two hugged leaders cannot
+   share a vertical run.  Deepest overhang first, so the leader that
+   lost the most from the clamp ends up in the lane closest to the
+   edge.
+
+   Each candidate lane is checked against every foreign pill's expanded
+   AABB.  A lane that would put the clamped path through a foreign pill
+   is rejected and the leader advances to the next lane.  After
+   HUG_MAX_LANES tries the leader is left at the last lane — a
+   pathological case that cannot fit is at least inside the band. */
+
+const HUG_MARGIN    = 6;
+const HUG_LANE_STEP = 5;
+const HUG_MAX_LANES = 20;
+
+function hugOverhangingLeaders(placed, stripAreaX0, stripAreaX1,
+                               stripH, topPad, trackOffsets) {
+  if (!placed.length) return;
+
+  const loBase = stripAreaX0 + HUG_MARGIN;
+  const hiBase = stripAreaX1 - HUG_MARGIN;
+
+  /* 1. Compute every leader's base path, classify overhang. */
+  const work = [];
+  for (const it of placed) {
+    it.finalPath = null;
+
+    const chanY    = stripH + (it.channelYRel || 0);
+    const pillTopY = stripH + topPad + trackOffsets[it.track];
+    const base = computeLeaderPath(
+      it.anchorCx, it.anchorCyRel, it.offsetA || 0,
+      chanY, it.pillCenterX, pillTopY,
+      it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
+    const bevelled = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
+    const path = _applyJogsToPath(bevelled, it);
+
+    let minX = Infinity, maxX = -Infinity;
+    for (const p of path) {
+      if (p[0] < minX) minX = p[0];
+      if (p[0] > maxX) maxX = p[0];
+    }
+
+    const overLeft  = loBase - minX;
+    const overRight = maxX - hiBase;
+    if (overLeft <= 0 && overRight <= 0) continue;
+
+    work.push({
+      it,
+      path,
+      side: (overLeft >= overRight) ? "L" : "R",
+      depth: Math.max(overLeft, overRight, 0),
+    });
+  }
+  if (!work.length) return;
+
+  /* 2. Deepest overhang first; the deepest one gets lane 0. */
+  work.sort((a, b) => b.depth - a.depth);
+
+  const laneCount = { L: 0, R: 0 };
+
+  for (const job of work) {
+    const { it, path, side } = job;
+    let assigned = null;
+
+    /* 3. Try each lane from the first unoccupied one onward. */
+    for (let lane = laneCount[side]; lane < HUG_MAX_LANES; lane++) {
+      const inset  = HUG_MARGIN + lane * HUG_LANE_STEP;
+      const loLane = stripAreaX0 + inset;
+      const hiLane = stripAreaX1 - inset;
+
+      /* Clamp every intermediate point to the lane; leave the two
+         endpoints where they are — they anchor to the pill and the
+         strip and must not move. */
+      const candidate = path.map((p, i) =>
+        (i === 0 || i === path.length - 1)
+          ? [p[0], p[1]]
+          : [Math.max(loLane, Math.min(hiLane, p[0])), p[1]]);
+
+      /* 4. Reject the lane if the clamped path would run through a
+         foreign pill's expanded AABB.  Same PILL_PROX test the
+         optimiser's own collision checks use, so the hugging pass
+         respects the same no-overlap invariant. */
+      const segs = _pathSegments(candidate, -1, 0.5);
+      let clear = true;
+      for (let j = 0; j < placed.length && clear; j++) {
+        const other = placed[j];
+        if (other === it) continue;
+        const qT = stripH + topPad + trackOffsets[other.track];
+        const box = {
+          qL: other.pillCenterX - other.w / 2 - PILL_PROX,
+          qR: other.pillCenterX + other.w / 2 + PILL_PROX,
+          qT: qT - PILL_PROX,
+          qB: qT + other.h + PILL_PROX,
+        };
+        for (const s of segs) {
+          if (s.maxX < box.qL || s.minX > box.qR) continue;
+          if (s.maxY < box.qT || s.minY > box.qB) continue;
+          if (_segBoxOverlap(s, box) > 0) { clear = false; break; }
+        }
+      }
+
+      if (clear) { assigned = { lane, path: candidate }; break; }
+    }
+
+    /* 5. Fallback: last lane, accept whatever overlaps it has.  The
+       pathological leader is at least inside the band, which is the
+       whole point of the pass. */
+    if (!assigned) {
+      const inset  = HUG_MARGIN + (HUG_MAX_LANES - 1) * HUG_LANE_STEP;
+      const loLane = stripAreaX0 + inset;
+      const hiLane = stripAreaX1 - inset;
+      const candidate = path.map((p, i) =>
+        (i === 0 || i === path.length - 1)
+          ? [p[0], p[1]]
+          : [Math.max(loLane, Math.min(hiLane, p[0])), p[1]]);
+      assigned = { lane: HUG_MAX_LANES - 1, path: candidate };
+    }
+
+    it.finalPath = assigned.path;
+    laneCount[side] = Math.max(laneCount[side], assigned.lane + 1);
+  }
+}
+
 /* ---- Vertex coordinate labels ---- */
 
 function computeVertexLabelPlacement(c, chunks, stripOffsetX,
                                      stripAreaX0, stripAreaW, stripH,
                                      orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
-  const FONT  = "700 12px ui-monospace, monospace";
+  const FONT  = "700 12px " + FONT_MONO;
   const PAD_X = 6, PAD_Y = 4, LINE_H = 14;
   const TRACK_GAP_X   = 10;
   const TRACK_V_GAP   = 8;
@@ -367,6 +510,26 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       for (const it of row) it.pillCenterX -= dx;
     }
 
+    /* Clamp each pill so both of its edges stay inside the label
+       band.  Without this a pill anchored near the far right of
+       the strip can extend past the canvas edge — the canvas
+       clips it silently and the exported PNG shows the strip
+       truncated on the right.  That is exactly the symptom that
+       appeared once the fonts got wider and every pill grew.  A
+       pill wider than the whole band is centred on the band and
+       accepted as-is; that case cannot be fixed by translation
+       and would need a wider IMG_W. */
+    for (const it of row) {
+      const halfW = it.w / 2;
+      const lo = AREA_X0 + halfW;
+      const hi = AREA_X1 - halfW;
+      if (lo <= hi) {
+        it.pillCenterX = Math.max(lo, Math.min(hi, it.pillCenterX));
+      } else {
+        it.pillCenterX = (AREA_X0 + AREA_X1) / 2;
+      }
+    }
+
     for (const it of row) {
       it.track     = t;
       it._baseDisp = Math.abs(it.pillCenterX - it.anchorCx);
@@ -433,6 +596,14 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
 
   polishLeaderLayout(placed, stripH, topPad, trackOffsets,
                      boundaries, wireSegments, wallEdges);
+
+  /* Overhang-hugging final pass.  Runs after the optimiser, the
+     double-crossing hug pass, and the pill push have all finished,
+     and before the style-conflict graph is built — so a leader that
+     gets clamped to a hugging lane is what the style graph sees,
+     which is what gets drawn.  See hugOverhangingLeaders above. */
+  hugOverhangingLeaders(placed, stripAreaX0, stripAreaX0 + stripAreaW,
+                        stripH, topPad, trackOffsets);
 
   const conflictAdj = _buildStyleConflictGraph(placed, stripH, topPad,
                                                 trackOffsets);
@@ -597,12 +768,21 @@ function drawVertexLabels(c, placement, stripY, stripH) {
     const pillTopY = pillTopYFor(it);
     const offA     = it.offsetA || 0;
 
-    const basePath = computeLeaderPath(
-      anchorX, anchorY, offA, chanY, pillX, pillTopY,
-      it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
-
-    const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
-    const path = _applyJogsToPath(bevelled, it);
+    let path;
+    if (it.finalPath) {
+      /* The overhang-hugging pass stores its result in PLACEMENT
+         coordinates — the top of the strip band is y = 0 there,
+         whereas the drawing pass works in canvas coordinates where
+         the strip starts at stripY.  Translate the stored y by
+         stripY; the x coordinates are identical in both systems. */
+      path = it.finalPath.map(p => [p[0], p[1] + stripY]);
+    } else {
+      const basePath = computeLeaderPath(
+        anchorX, anchorY, offA, chanY, pillX, pillTopY,
+        it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
+      const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
+      path = _applyJogsToPath(bevelled, it);
+    }
 
     const style = LEADER_STYLES[it.leaderStyle % LEADER_STYLES.length];
     c.setLineDash(style.dash || []);

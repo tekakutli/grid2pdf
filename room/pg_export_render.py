@@ -15,6 +15,35 @@ this exporter produces and nothing else reads them.
 
 
 RENDER_JS = r"""
+/* ==========================================================================
+   TEXT WRAPPING HELPER
+   ==========================================================================
+   Splits a string on whitespace and packs the words into lines no
+   wider than maxW, measured with the current c.font.  Words that
+   alone exceed maxW are left on their own line (rather than broken
+   mid-word); the caller is expected to shrink the font in that case
+   or accept the overflow.  Used by the info column so long labels
+   like "Wall segments . arrow style" or "step face (forward hatch)"
+   do not run past INFO_W and paint over the plan. */
+
+function _wrapText(c, text, maxW) {
+  const words = String(text).split(/\s+/).filter(w => w.length > 0);
+  if (!words.length) return [""];
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (c.measureText(test).width <= maxW) {
+      cur = test;
+    } else {
+      if (cur) lines.push(cur);
+      cur = w;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
 /* ---- Crop and rasterise ---- */
 
 function cropCanvasToContent(srcCanvas, pad) {
@@ -257,12 +286,12 @@ function renderCableRunToCanvas(tcId) {
   const totalLen = totalCableLength(orderedIds);
   const nParts = allCables().filter(x => trueCableIdOf(x) === tcId).length;
 
-  c.font = "700 22px -apple-system, system-ui, sans-serif";
+  c.font = "700 22px " + FONT_SANS;
   c.fillStyle = "#000000";
   c.textAlign = "left"; c.textBaseline = "middle";
   c.fillText(T("cableTitle") + " " + tcId, MARGIN, MARGIN + TITLE_H / 2);
 
-  c.font = "600 13px ui-monospace, monospace";
+  c.font = "600 13px " + FONT_MONO;
   c.fillStyle = "#333333";
   c.textAlign = "right";
   c.fillText(
@@ -369,7 +398,7 @@ function renderCableRunToCanvas(tcId) {
 
     drawVertexLabels(c, labelPlacement, stripY, STRIP_FIXED_H);
 
-    c.font = "700 18px sans-serif";
+    c.font = "700 18px " + FONT_SANS;
     c.fillStyle = "#333333";
     c.textAlign = "center"; c.textBaseline = "middle";
     for (let ri = 0; ri < wallLayouts.length - 1; ri++) {
@@ -392,7 +421,7 @@ function renderCableRunToCanvas(tcId) {
     c.strokeStyle = "#000000";
     c.fillStyle = "#000000";
     c.lineWidth = 1;
-    c.font = "600 11px ui-monospace, monospace";
+    c.font = "600 11px " + FONT_MONO;
     c.textAlign = "right";
     c.textBaseline = "middle";
     for (const t of ticks) {
@@ -412,7 +441,7 @@ function renderCableRunToCanvas(tcId) {
     c.translate(axisLeft + 4, stripY + STRIP_FIXED_H / 2);
     c.rotate(-Math.PI / 2);
     c.textAlign = "center"; c.textBaseline = "middle";
-    c.font = "600 10px ui-monospace, monospace";
+    c.font = "600 10px " + FONT_MONO;
     c.fillStyle = "#333333";
     c.fillText(T("heightAxis"), 0, 0);
     c.restore();
@@ -598,14 +627,37 @@ function renderCableRunToCanvas(tcId) {
     }
 
     {
+      /* The info column is 240 px wide and its text was previously
+         drawn at a fixed 14 px with no wrapping.  The old system
+         fonts just barely fit the longest labels; the printable
+         fonts are wider, so those labels now ran past INFO_W and
+         painted on top of the plan.  The fix is to wrap every text
+         block against its real available width and let the row
+         height grow when a label needs a second line.  INFO_LINE_H
+         matches the natural line height of the 14 px font. */
       let infoCurY = infoY;
       const infoX0 = infoX;
 
-      c.font = "700 14px -apple-system, system-ui, sans-serif";
-      c.fillStyle = "#000000";
-      c.textAlign = "left"; c.textBaseline = "top";
-      c.fillText(T("lengthBreakdown"), infoX0, infoCurY);
-      infoCurY += INFO_HEADER_H;
+      const INFO_LINE_H = 14;
+      const INFO_TEXT_W = INFO_W - 8;   // 4 px on each side
+
+      /* Draw a string wrapped to fit the info column, advancing
+         the local cursor by the block's actual height (INFO_HEADER_H
+         for a one-line header, more when it wraps). */
+      const _drawHeader = (text) => {
+        c.fillStyle = "#000000";
+        c.textAlign = "left";
+        c.textBaseline = "top";
+        c.font = "700 14px " + FONT_SANS;
+        const lines = _wrapText(c, text, INFO_TEXT_W);
+        for (let i = 0; i < lines.length; i++) {
+          c.fillText(lines[i], infoX0, infoCurY + i * INFO_LINE_H);
+        }
+        infoCurY += Math.max(INFO_HEADER_H,
+                             lines.length * INFO_LINE_H + 4);
+      };
+
+      _drawHeader(T("lengthBreakdown"));
 
       const parts = allCables().filter(x => trueCableIdOf(x) === tcId);
       let wallLen = 0, floorLen = 0;
@@ -625,34 +677,58 @@ function renderCableRunToCanvas(tcId) {
       if (floorLen > 0.5) rows.push([T("floorRuns"), fmtM(floorLen)]);
       rows.push([T("totalRow"), fmtM(totalLen)]);
 
-      c.font = "500 14px ui-monospace, monospace";
-      c.fillStyle = "#000000";
-
-      const LABEL_MIN_COL_W = 96;
+      /* Label column is capped so the value column can always sit
+         inside INFO_W.  Under the old fonts the natural measured
+         width was under 96 px; if a future translation or font
+         pushes a label past 96 px the label itself wraps rather
+         than the value column sliding out of the box. */
+      const LABEL_MAX_COL_W = 96;
       const VALUE_GUTTER_PX = 10;
-      let labelColW = LABEL_MIN_COL_W;
-      for (const [label] of rows) {
-        const w = c.measureText(label).width;
-        if (w > labelColW) labelColW = w;
-      }
-      const valueColX = infoX0 + 4 + labelColW + VALUE_GUTTER_PX;
+      const valueColX = infoX0 + 4 + LABEL_MAX_COL_W + VALUE_GUTTER_PX;
+      const valueMaxW = infoX0 + INFO_W - 4 - valueColX;
 
       for (const [label, val] of rows) {
-        c.fillText(label, infoX0 + 4, infoCurY);
-        c.fillText(val,   valueColX,  infoCurY);
-        infoCurY += INFO_ROW_H;
+        c.fillStyle = "#000000";
+        c.textAlign = "left"; c.textBaseline = "top";
+
+        c.font = "500 14px " + FONT_SANS;
+        const labelLines = _wrapText(c, label, LABEL_MAX_COL_W);
+        for (let i = 0; i < labelLines.length; i++) {
+          c.fillText(labelLines[i], infoX0 + 4,
+                     infoCurY + i * INFO_LINE_H);
+        }
+
+        c.font = "500 14px " + FONT_MONO;
+        const valLines = _wrapText(c, val, valueMaxW);
+        for (let i = 0; i < valLines.length; i++) {
+          c.fillText(valLines[i], valueColX,
+                     infoCurY + i * INFO_LINE_H);
+        }
+
+        const n = Math.max(labelLines.length, valLines.length);
+        infoCurY += Math.max(INFO_ROW_H, n * INFO_LINE_H + 4);
       }
       infoCurY += INFO_GAP;
 
-      c.font = "700 14px -apple-system, system-ui, sans-serif";
-      c.fillStyle = "#000000";
-      c.fillText(T("legend"), infoX0, infoCurY);
-      infoCurY += INFO_HEADER_H;
+      _drawHeader(T("legend"));
 
+      /* A legend row is a swatch plus a text label.  The swatch is
+         fixed-geometry (28 px wide plus an 8 px gap); the label
+         gets the remaining width and wraps freely.  The swatch is
+         centred vertically on the text block, and the row height
+         grows to fit whichever is taller. */
       const _swatch = (label, h, draw) => {
         const swX = infoX0 + 4;
-        const swY = infoCurY + 8;
         const swW = 28;
+        const textX = swX + swW + 8;
+        const textW = infoX0 + INFO_W - 4 - textX;
+
+        c.font = "500 14px " + FONT_SANS;
+        const lines = _wrapText(c, label, textW);
+        const textH = lines.length * INFO_LINE_H;
+        const blockH = Math.max(INFO_ROW_H, textH + 4);
+        const swY = infoCurY + blockH / 2;
+
         c.save();
         c.strokeStyle = "#000000";
         c.fillStyle   = "#000000";
@@ -660,11 +736,16 @@ function renderCableRunToCanvas(tcId) {
         c.lineJoin    = "round";
         draw(swX, swY, swW, h);
         c.restore();
+
         c.fillStyle = "#000000";
-        c.font = "500 14px -apple-system, system-ui, sans-serif";
+        c.font = "500 14px " + FONT_SANS;
         c.textAlign = "left"; c.textBaseline = "top";
-        c.fillText(label, swX + swW + 8, infoCurY);
-        infoCurY += INFO_ROW_H;
+        const textTop = infoCurY + (blockH - textH) / 2;
+        for (let i = 0; i < lines.length; i++) {
+          c.fillText(lines[i], textX, textTop + i * INFO_LINE_H);
+        }
+
+        infoCurY += blockH;
       };
 
       _swatch(T("legendCable"), 9, (x, y, w) => {
@@ -701,11 +782,7 @@ function renderCableRunToCanvas(tcId) {
       infoCurY += INFO_GAP;
 
       if (hasWalls) {
-        c.font = "700 14px -apple-system, system-ui, sans-serif";
-        c.fillStyle = "#000000";
-        c.textAlign = "left"; c.textBaseline = "top";
-        c.fillText(T("wallSegmentsArrowStyle"), infoX0, infoCurY);
-        infoCurY += INFO_HEADER_H;
+        _drawHeader(T("wallSegmentsArrowStyle"));
 
         const arrowLen = 36;
         for (const [segIdx, entry] of segDirectory) {
@@ -714,10 +791,18 @@ function renderCableRunToCanvas(tcId) {
           const ax0 = infoX0 + 4 + r * 2 + 6;
           drawArrowSample(c, ax0, infoCurY + WALL_ROW_H / 2, arrowLen,
                           styleFor(entry.order));
-          c.font = "600 14px ui-monospace, monospace";
+
+          /* Tag sits to the right of the arrow sample.  Fit the
+             tag against the remaining column width so a long tag
+             (e.g. "SR.edge[1]") cannot slide past INFO_W. */
+          const tagX = ax0 + arrowLen + 8;
+          const tagMaxW = infoX0 + INFO_W - 4 - tagX;
           c.fillStyle = "#000000";
           c.textAlign = "left"; c.textBaseline = "middle";
-          c.fillText(entry.tag, ax0 + arrowLen + 8, infoCurY + WALL_ROW_H / 2);
+          c.font = "600 14px " + FONT_MONO;
+          const tagLines = _wrapText(c, entry.tag, tagMaxW);
+          c.fillText(tagLines[0], tagX, infoCurY + WALL_ROW_H / 2);
+
           infoCurY += WALL_ROW_H;
         }
         c.textBaseline = "top";

@@ -1,29 +1,26 @@
 """
-boxes_html.py — assembles the HTML/JS bundle from boxes_panel + boxes_live.
+boxes_html.py — assembles the HTML/JS bundle from boxes_panel +
+boxes_live.
 
 Concatenation order (all inside one <script>):
 
     1. HTML_HEAD       — the panel markup, empty canvas, light base CSS
-    2. const GEOMETRY  — the geometry dict, JSON-encoded
-    3. LIVE_JS         — the concatenation from boxes_live.py, which
+    2. const FONT_*    — from playground_fonts.py
+    3. const GEOMETRY  — the geometry dict, JSON-encoded
+    4. LIVE_JS         — the concatenation from boxes_live.py, which
                          starts with the model (bx_core.CORE_JS)
-    4. BOOT_JS         — wires button onclick handlers, kicks off load
-    5. HTML_TAIL       — closes the script tag and body
+    5. BOOT_JS         — wires button onclick handlers, kicks off load
+    6. HTML_TAIL       — closes the script tag and body
 
-The model is NOT injected here separately.  It is the first thing in
-LIVE_JS, so that bx_base's load-time statements
-(viewFloor.zoom = 1; viewWall.zoom = 1; mouse.shift = false; …) find
-the objects they extend.  An earlier revision pulled a placeholder
-CORE_JS from boxes_panel and injected it here, which left bx_core's
-real model out of the bundle entirely — the browser threw
-"viewFloor is not defined" on bx_base's first line and nothing after
-it ran.
+The @font-face block is spliced into <head> by inject_head; the
+FONT_MONO / FONT_SANS / FONT_FACE_CSS constants are declared by
+FONT_JS before any module reads them.
 """
 
 import json
 
-from boxes_panel     import HTML_HEAD, BOOT_JS, HTML_TAIL
-from boxes_live      import LIVE_JS
+from boxes_panel      import HTML_HEAD, BOOT_JS, HTML_TAIL
+from boxes_live       import LIVE_JS
 from playground_fonts import FONT_JS, inject_head
 
 

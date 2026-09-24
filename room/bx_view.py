@@ -148,7 +148,7 @@ function drawBoxLabel(b, faded) {
   ctx.translate(cxs, cys);
   ctx.rotate(-tRot * Math.PI / 180);
   ctx.fillStyle = faded ? PALETTE.inkSoft : PALETTE.ink;
-  ctx.font = `600 ${fontSize.toFixed(1)}px ui-monospace, monospace`;
+  ctx.font = `600 ${fontSize.toFixed(1)}px ${FONT_MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(b.name, 0, 0);
@@ -162,7 +162,7 @@ function drawInvalidChip(b) {
   const label = T("chipInvalid");
   ctx.save();
   ctx.translate(cxs, minY - 11);
-  ctx.font = "700 10px ui-monospace, monospace";
+  ctx.font = "700 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const tw = ctx.measureText(label).width;
@@ -244,7 +244,7 @@ function drawHandles(b) {
 
   /* ↻ glyph inside the circle.  U+21BB is well-supported in every
      monospace stack the playground falls back to. */
-  ctx.font = "700 12px ui-monospace, monospace";
+  ctx.font = "700 12px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = PALETTE.highlight;

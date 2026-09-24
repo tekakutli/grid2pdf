@@ -96,8 +96,7 @@ HTML_HEAD = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Box placement playground</title>
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden;
-               font-family: -apple-system, system-ui, Segoe UI, sans-serif; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
   #ui {
     position:absolute; top:12px; left:12px; z-index:10;
     background:rgba(255,255,255,0.96); padding:12px 14px;
@@ -139,7 +138,7 @@ HTML_HEAD = r"""<!DOCTYPE html>
   #ui button.primary:hover { background:#222222; }
   #ui hr { border:0; border-top:1px solid #eee; margin:9px 0; }
   #status { margin-top:8px; font-size:12px; min-height:16px; font-weight:600;
-            font-family: ui-monospace, Menlo, Consolas, monospace; }
+            font-family: ${FONT_MONO}; }
   #status.ok  { color:#15803d; }
   #status.bad { color:#dc2626; }
   #status.warn{ color:#ea580c; }
@@ -227,7 +226,7 @@ PANEL_JS = r"""
       flex: 1; min-width: 0;
     }
     #ui .row.fieldRow label > span.lbl {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 8.5px; font-weight: 700; letter-spacing: 0.18em;
       text-transform: uppercase; color: #5a6774;
     }
@@ -251,7 +250,7 @@ PANEL_JS = r"""
     }
     #ui .row.fieldColumn label > span.lbl {
       flex: 0 0 34px;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 8.5px; font-weight: 700; letter-spacing: 0.18em;
       text-transform: uppercase; color: #5a6774;
     }
@@ -261,7 +260,7 @@ PANEL_JS = r"""
     #ui button {
       width: 100%; box-sizing: border-box; min-width: 0;
       white-space: normal; overflow-wrap: break-word;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
     }
     #ui .row.grid2x2 button,
     #ui .row.grid3 button {
@@ -313,16 +312,16 @@ PANEL_JS = r"""
     }
     #ui .titleRow { display: flex; flex-direction: column; gap: 1px; }
     #ui .titleLabel {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 8.5px; letter-spacing: 0.20em; font-weight: 700;
       line-height: 1.3; text-transform: uppercase;
     }
     #ui .titleValue {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10.5px; line-height: 1.4; overflow-wrap: anywhere;
     }
     #ui #status {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10px; line-height: 1.45;
       height: 48px; min-height: 48px; max-height: 48px;
       overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere;
@@ -595,7 +594,7 @@ PANEL_JS = r"""
       border: 1px solid #1e2836;
       border-radius: 3px;
       box-shadow: 0 6px 28px rgba(0, 0, 0, 0.65);
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10.5px;
       line-height: 1.35;
       color: #a8b5c4;
@@ -606,7 +605,7 @@ PANEL_JS = r"""
       display: flex; align-items: center; gap: 4px;
       margin: 0 0 10px; padding: 0 0 8px;
       border-bottom: 1px solid #1e2836;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 11px; font-weight: 700;
       letter-spacing: 0.16em; text-transform: uppercase;
       color: #dce6f2;
@@ -615,7 +614,7 @@ PANEL_JS = r"""
     #ui .sectionLabel {
       display: flex; align-items: center; gap: 8px;
       margin: 12px 0 6px;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 8.5px; font-weight: 700;
       letter-spacing: 0.22em; color: #5a6774;
       text-transform: uppercase;
@@ -630,7 +629,7 @@ PANEL_JS = r"""
       background: transparent;
       border: 1px solid #223040;
       color: #b8c4d2;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10.5px; font-weight: 500;
       letter-spacing: 0.02em; line-height: 1.35;
       text-align: left; padding: 5px 9px;
@@ -689,7 +688,7 @@ PANEL_JS = r"""
 
     #ui #boxDeleteBtn {
       width: 100%; padding: 5px 8px; text-align: center;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10px; font-weight: 700;
       letter-spacing: 0.10em; text-transform: uppercase;
       background: transparent;
@@ -711,7 +710,7 @@ PANEL_JS = r"""
       flex: 0 0 auto !important;
       display: inline-flex !important; align-items: center !important;
       justify-content: center !important;
-      font-family: ui-monospace, Menlo, Consolas, monospace !important;
+      font-family: ${FONT_MONO} !important;
       font-size: 11px !important; font-weight: 700 !important;
       line-height: 1 !important; text-align: center !important;
       background: transparent !important;
@@ -753,7 +752,7 @@ PANEL_JS = r"""
       border: 1px solid #1e2836; border-radius: 3px;
       box-shadow: 0 6px 28px rgba(0, 0, 0, 0.65);
       color: #a8b5c4;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10px; font-weight: 700;
       letter-spacing: 0.10em; text-transform: uppercase;
       cursor: pointer;
@@ -767,7 +766,7 @@ PANEL_JS = r"""
       border: 1px solid #223040;
       border-radius: 2px;
       padding: 3px 6px;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 11px; font-weight: 700;
       color: #dce6f2;
       outline: 0;
@@ -792,14 +791,14 @@ PANEL_JS = r"""
       background: rgba(0, 229, 255, 0.02);
     }
     #ui .boxIndex {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 8.5px; font-weight: 700;
       letter-spacing: 0.16em; text-transform: uppercase;
       color: #00e5ff;
       line-height: 1.5; overflow-wrap: anywhere;
     }
     #ui .boxSelInfo {
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 10px; font-weight: 600;
       letter-spacing: 0.04em; color: #a8b5c4;
       overflow-wrap: anywhere;
@@ -817,7 +816,7 @@ PANEL_JS = r"""
       border: 1px solid #223040;
       border-radius: 3px;
       box-shadow: 0 24px 60px rgba(0, 0, 0, 0.70);
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 11px;
       line-height: 1.6;
       color: #a8b5c4;
@@ -836,7 +835,7 @@ PANEL_JS = r"""
       margin: 0 0 16px;
       padding: 0 0 10px;
       border-bottom: 1px solid #1e2836;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-family: ${FONT_MONO};
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.16em;
@@ -863,7 +862,7 @@ PANEL_JS = r"""
       background: rgba(220, 230, 242, 0.03);
     }
     #helpPopover .body {
-      font-family: -apple-system, system-ui, sans-serif;
+      font-family: ${FONT_SANS};
       font-size: 12.5px;
       line-height: 1.65;
       color: #a8b5c4;

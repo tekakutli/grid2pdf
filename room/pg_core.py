@@ -53,8 +53,7 @@ HTML_HEAD = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Cable / pipe layout planner</title>
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden;
-               font-family: -apple-system, system-ui, Segoe UI, sans-serif; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
   #ui {
     position:absolute; top:12px; left:12px; z-index:10;
     background:rgba(255,255,255,0.96); padding:12px 14px;
@@ -93,8 +92,7 @@ HTML_HEAD = r"""<!DOCTYPE html>
                       font-weight:600; }
   #ui button.active:hover { background:#b45309; }
   #ui hr { border:0; border-top:1px solid #eee; margin:9px 0; }
-  #status { margin-top:8px; font-size:12px; min-height:16px; font-weight:600;
-            font-family: ui-monospace, Menlo, Consolas, monospace; }
+  #status { margin-top:8px; font-size:12px; min-height:16px; font-weight:600; }
   #status.ok  { color:#0f766e; }
   #status.bad { color:#b91c1c; }
   #status.warn{ color:#b45309; }

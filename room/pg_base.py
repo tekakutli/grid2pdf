@@ -282,7 +282,7 @@ function _roundRect(x, y, w, h, r) {
 
 function _drawValuePill(cx, cy, text) {
   ctx.save();
-  ctx.font = "600 10px ui-monospace, monospace";
+  ctx.font = "600 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const w = ctx.measureText(text).width + 10;
@@ -302,7 +302,7 @@ function _drawValuePill(cx, cy, text) {
    and pending states of a ruler want their own accent. */
 function _drawValuePillColored(cx, cy, text, color) {
   ctx.save();
-  ctx.font = "600 10px ui-monospace, monospace";
+  ctx.font = "600 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const w = ctx.measureText(text).width + 10;
@@ -364,7 +364,7 @@ function _gridLabel(g, allGrids) {
 
 function _drawGridPill(sx, sy, label, active) {
   ctx.save();
-  ctx.font = "700 10px ui-monospace, monospace";
+  ctx.font = "700 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const textW = ctx.measureText(label).width;

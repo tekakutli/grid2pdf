@@ -189,7 +189,7 @@ function _roundRect(x, y, w, h, r) {
 
 function _drawValuePill(cx, cy, text, accent) {
   ctx.save();
-  ctx.font = "600 10px ui-monospace, monospace";
+  ctx.font = "600 10px " + FONT_MONO;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const w = ctx.measureText(text).width + 10;

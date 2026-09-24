@@ -55,9 +55,18 @@ function _buildLayout(placed, stripH, topPad, trackOffsets) {
   const boxes = new Array(n);
   for (let i = 0; i < n; i++) {
     const it = placed[i];
-    const base = _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets);
-    const bev  = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
-    const p    = _applyJogsToPath(bev, it);
+    let p;
+    if (it.finalPath) {
+      /* The overhang-hugging pass in pg_export_labels.py already
+         rewrote this leader's polyline.  Use the rewritten path
+         verbatim so the style-conflict graph and the drawn leaders
+         both see the hugging shape, not the pre-hug shape. */
+      p = it.finalPath;
+    } else {
+      const base = _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets);
+      const bev  = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
+      p    = _applyJogsToPath(bev, it);
+    }
     paths[i] = p;
     segs[i]  = _pathSegments(p, i, 1.0);
     const qT = stripH + topPad + trackOffsets[it.track];

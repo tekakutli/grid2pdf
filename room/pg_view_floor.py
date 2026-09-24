@@ -102,7 +102,7 @@ function drawColumnMarkers() {
     ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    ctx.font = "700 10px ui-monospace, monospace";
+    ctx.font = "700 10px " + FONT_MONO;
     ctx.fillStyle = PALETTE.ink;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -160,7 +160,7 @@ function drawScaleBar() {
     ? Math.round(target * 100) + " cm"
     : target + " m";
 
-  ctx.font = "600 10px ui-monospace, monospace";
+  ctx.font = "600 10px " + FONT_MONO;
   ctx.fillStyle = PALETTE.ink;
   ctx.textBaseline = "top";
   ctx.textAlign = "left";

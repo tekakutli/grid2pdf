@@ -35,7 +35,8 @@ function openExportPreview(images) {
 <html><head><meta charset="utf-8">
 <title>${T("previewTitle")}</title>
 <style>
-  body { font-family: -apple-system, system-ui, sans-serif;
+  ${FONT_FACE_CSS}
+  body { font-family: ${FONT_SANS};
          margin: 0; padding: 24px; background: #f1f5f9; color: #000000; }
   h1 { font-size: 22px; margin: 0 0 4px; }
   p.sub { margin: 0 0 16px; color: #333333; font-size: 13px; }
@@ -65,9 +66,9 @@ function openExportPreview(images) {
   .card { background: #ffffff; border-radius: 8px; padding: 18px;
           margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
   .card h2 { font-size: 15px; margin: 0 0 4px;
-             font-family: ui-monospace, monospace; color: #000000; }
+             font-family: ${FONT_MONO}; color: #000000; }
   .card .meta { font-size: 12px; color: #333333; margin: 0 0 12px;
-                font-family: ui-monospace, monospace; }
+                font-family: ${FONT_MONO}; }
   .card img { max-width: 100%; height: auto; display: block;
               border: 1px solid #cccccc; border-radius: 4px; }
   .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }

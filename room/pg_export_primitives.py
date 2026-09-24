@@ -46,7 +46,7 @@ function drawBadge(c, x, y, num) {
   c.strokeStyle = "#000000";
   c.lineWidth = 1.6;
   c.stroke();
-  c.font = "700 12px ui-monospace, monospace";
+  c.font = "700 12px " + FONT_MONO;
   c.fillStyle = "#000000";
   c.textAlign = "center"; c.textBaseline = "middle";
   c.fillText(String(num), x, y + 0.5);
