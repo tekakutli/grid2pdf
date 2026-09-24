@@ -333,6 +333,9 @@ const TRANSLATIONS = {
     filterCollinear:      "Filter collinear vertices in strip",
     filterCollinearTitle: "Collapse wall-edge anchors that lie on a " +
                           "straight run of the same wall",
+    showAngles:           "Show cable angles",
+    showAnglesTitle:      "Add the slope angle of every connecting " +
+                          "cable segment to its vertex pill",
     downloadPng:          "Download PNG",
     downloadJson:         "Download JSON",
     cardSizeMeta: (w, h, mm) =>
@@ -621,6 +624,10 @@ const TRANSLATIONS = {
     filterCollinear:      "Filtrar vértices colineales en la tira",
     filterCollinearTitle: "Colapsar anclajes de borde de muro que yacen "
                         + "sobre un tramo recto del mismo muro",
+    showAngles:           "Mostrar ángulos",
+    showAnglesTitle:      "Añadir el ángulo de inclinación de cada " +
+                          "tramo de cable conectado a su píldora " +
+                          "de vértice",
     downloadPng:          "Descargar PNG",
     downloadJson:         "Descargar JSON",
     cardSizeMeta: (w, h, mm) =>

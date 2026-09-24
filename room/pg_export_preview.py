@@ -2,7 +2,7 @@
 pg_export_preview.py — the preview page.
 
 openExportPreview writes one HTML document into a new tab: a title,
-a subtitle, a hint paragraph, a toolbar with three controls, and one
+a subtitle, a hint paragraph, a toolbar with four controls, and one
 card per exported cable.
 
 The toolbar carries:
@@ -14,6 +14,16 @@ The toolbar carries:
     Filter collinear       the checkbox that flips
     vertices in strip      window.filterCollinearVerticesInStrip and
                            re-renders every card in place
+    Show cable angles      the checkbox that flips
+                           window.showCableAngles and re-renders
+                           every card in place
+
+The two checkboxes share a `rerenderAll` helper: each handler flips
+its global, then asks every card to redraw in place.  Card DOM stays
+put; only the PNG src, the meta line, and the JSON link change.  The
+two flags compose — the collinear filter runs first inside
+computeVertexLabelPlacement and may remove some pills entirely, then
+the angle flag decorates the survivors.
 
 Nothing here is in the main playground's scope.  The page is
 self-contained — its own CSS, its own script — and the only
@@ -92,6 +102,10 @@ function openExportPreview(images) {
     <input type="checkbox" id="filterCollinear">
     ${T("filterCollinear")}
   </label>
+  <label class="toggle" title="${T("showAnglesTitle")}">
+    <input type="checkbox" id="showAngles">
+    ${T("showAngles")}
+  </label>
   <span class="hint" id="dlHint"></span>
 </div>`;
 
@@ -129,6 +143,7 @@ function openExportPreview(images) {
   const allJsonBtn = doc.getElementById("downloadAllJsonBtn");
   const hint       = doc.getElementById("dlHint");
   const filterCb   = doc.getElementById("filterCollinear");
+  const anglesCb   = doc.getElementById("showAngles");
 
   if (allBtn) {
     allBtn.addEventListener("click", () => {
@@ -177,52 +192,69 @@ function openExportPreview(images) {
     });
   }
 
+  /* Shared re-render.  Both toolbar checkboxes flip a global that
+     renderCableRunToCanvas reads, then ask every card to redraw in
+     place.  Card DOM stays put; only the PNG src, the meta line,
+     and the JSON link change.  The two flags compose: the collinear
+     filter runs first inside computeVertexLabelPlacement and may
+     remove some pills entirely, then the angle flag decorates the
+     survivors. */
+  const rerenderAll = () => {
+    for (const tc of state.trueCables) {
+      let result = null;
+      try {
+        result = renderCableRunToCanvas(tc.id);
+      } catch (err) {
+        console.error("re-render failed for cable " + tc.id, err);
+        continue;
+      }
+      if (!result || !result.canvas) continue;
+
+      const card = doc.querySelector(`[data-cable-id="${tc.id}"]`);
+      if (!card) continue;
+
+      const url = result.canvas.toDataURL("image/png");
+      const imgEl = card.querySelector("img");
+      if (imgEl) imgEl.src = url;
+
+      const metaEl = card.querySelector(".meta");
+      if (metaEl) {
+        const wpx = result.canvas.width;
+        const hpx = result.canvas.height;
+        const mm  = Math.round(wpx * 25.4 / 300);
+        metaEl.textContent = T("cardSizeMeta")(wpx, hpx, mm);
+      }
+
+      const links = card.querySelectorAll("a");
+      if (links[0]) links[0].href = url;
+      if (links[1]) {
+        const jsonUrl = "data:application/json;charset=utf-8,"
+                      + encodeURIComponent(
+                          JSON.stringify(result.meta, null, 2));
+        links[1].href = jsonUrl;
+      }
+
+      const stored = images.find(im => im.id === tc.id);
+      if (stored) {
+        stored.canvas = result.canvas;
+        stored.meta   = result.meta;
+      }
+    }
+  };
+
   if (filterCb) {
     filterCb.checked = !!window.filterCollinearVerticesInStrip;
     filterCb.addEventListener("change", () => {
       window.filterCollinearVerticesInStrip = filterCb.checked;
+      rerenderAll();
+    });
+  }
 
-      for (const tc of state.trueCables) {
-        let result = null;
-        try {
-          result = renderCableRunToCanvas(tc.id);
-        } catch (err) {
-          console.error("re-render failed for cable " + tc.id, err);
-          continue;
-        }
-        if (!result || !result.canvas) continue;
-
-        const card = doc.querySelector(
-          `[data-cable-id="${tc.id}"]`);
-        if (!card) continue;
-
-        const url = result.canvas.toDataURL("image/png");
-        const imgEl = card.querySelector("img");
-        if (imgEl) imgEl.src = url;
-
-        const metaEl = card.querySelector(".meta");
-        if (metaEl) {
-          const wpx = result.canvas.width;
-          const hpx = result.canvas.height;
-          const mm  = Math.round(wpx * 25.4 / 300);
-          metaEl.textContent = T("cardSizeMeta")(wpx, hpx, mm);
-        }
-
-        const links = card.querySelectorAll("a");
-        if (links[0]) links[0].href = url;
-        if (links[1]) {
-          const jsonUrl = "data:application/json;charset=utf-8,"
-                        + encodeURIComponent(
-                            JSON.stringify(result.meta, null, 2));
-          links[1].href = jsonUrl;
-        }
-
-        const stored = images.find(im => im.id === tc.id);
-        if (stored) {
-          stored.canvas = result.canvas;
-          stored.meta   = result.meta;
-        }
-      }
+  if (anglesCb) {
+    anglesCb.checked = !!window.showCableAngles;
+    anglesCb.addEventListener("change", () => {
+      window.showCableAngles = anglesCb.checked;
+      rerenderAll();
     });
   }
 }

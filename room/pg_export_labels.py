@@ -30,6 +30,40 @@ pills and the leaders are drawn in the same pass.
 
 LABELS_JS = r"""
 /* ==========================================================================
+   ANGLE-DISPLAY TOGGLE
+   ==========================================================================
+   Flipped by the "Show cable angles" checkbox on the preview page (see
+   pg_export_preview.py).  When true, computeVertexLabelPlacement adds
+   one line per cable edge meeting at a vertex pill, showing that
+   edge's slope angle from horizontal. */
+
+window.showCableAngles = false;
+
+/* ==========================================================================
+   VERTEX-LABEL TYPOGRAPHY
+   ==========================================================================
+   One knob: VLABEL_FONT_SIZE.  Every dimension the pill draws — its
+   own inner padding, its line pitch, and the box that surrounds the
+   name — is derived from that one number (plus the ratios below), so
+   bumping the size here reflows every pill in the drawing without
+   touching any of the placement or drawing math.
+
+   Changing the FONT FAMILY alone is also covered: the name box's
+   WIDTH is measured from the actual glyphs at draw time, so a wider
+   or narrower face shifts the box with the text. */
+
+const VLABEL_FONT_SIZE   = 12;
+const VLABEL_FONT_WEIGHT = 700;
+
+const VLABEL_PADX_RATIO  = 0.65;   // pill inner padding, horizontal
+const VLABEL_PADY_RATIO  = 0.35;   // pill inner padding, vertical
+const VLABEL_LINE_RATIO  = 1.35;   // line pitch  (LINE_H  / FONT_SIZE)
+
+const VLABEL_BOXPAD_RATIO = 0.30;  // name-box padding around the text
+const VLABEL_BOXH_RATIO   = 1.15;  // name-box height / FONT_SIZE
+const VLABEL_BOX_TOPAIR_RATIO = 0.22;  // extra top-side air inside the name box
+
+/* ==========================================================================
    OVERHANG-HUGGING FINAL PASS
    ==========================================================================
 
@@ -178,8 +212,10 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
                                      stripAreaX0, stripAreaW, stripH,
                                      orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
-  const FONT  = "700 12px " + FONT_MONO;
-  const PAD_X = 8, PAD_Y = 4, LINE_H = 14;
+  const FONT  = VLABEL_FONT_WEIGHT + " " + VLABEL_FONT_SIZE + "px " + FONT_MONO;
+  const PAD_X = Math.round(VLABEL_FONT_SIZE * VLABEL_PADX_RATIO);
+  const PAD_Y = Math.round(VLABEL_FONT_SIZE * VLABEL_PADY_RATIO);
+  const LINE_H = Math.round(VLABEL_FONT_SIZE * VLABEL_LINE_RATIO);
   const TRACK_GAP_X   = 10;
   const TRACK_V_GAP   = 8;
   const GROUP_TOL     = 8;
@@ -299,6 +335,24 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
   const items = [];
   c.save();
   c.font = FONT;
+
+  /* Pre-compute the pill name for every member anchor, so the angle
+     lines below can name the neighbour pill each angle points at.
+     A pill's name is "V" + (its minimum ordered index + 1) — the same
+     rule the main loop below uses — so this map stays consistent with
+     the names drawn on the pills themselves. */
+  const anchorPillName = new Map();
+  for (const grp of clusters) {
+    let minIdx = Infinity;
+    for (const m of grp) {
+      const oi = orderIdx.get(m.aid);
+      if (typeof oi === "number" && oi < minIdx) minIdx = oi;
+    }
+    if (minIdx === Infinity) continue;
+    const pn = "V" + (minIdx + 1);
+    for (const m of grp) anchorPillName.set(m.aid, pn);
+  }
+
   for (const grp of clusters) {
     let minIdx = Infinity;
     for (const m of grp) {
@@ -310,7 +364,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     const lines = [];
     if (grp.length === 1) {
       const m = grp[0];
-      lines.push({ left:  name || "", right: "h " + fmtCm(m.h) });
+      lines.push({ left:  name || "", right: "h " + fmtCm(m.h),
+                   isName: !!name });
       lines.push({ left:  sideLineFor(m), right: null });
     } else {
       grp.sort((a, b) => {
@@ -323,8 +378,117 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
         lines.push({
           left:  (gi === 0 && name) ? name : "",
           right: "h " + fmtCm(m.h),
+          isName: (gi === 0 && !!name),
         });
         lines.push({ left: sideLineFor(m), right: null });
+      }
+    }
+
+    /* ---- optional angle lines --------------------------------
+       When the preview page's "Show cable angles" checkbox is on,
+       every cable edge that touches this cluster contributes one
+       extra line to the pill: the bearing of that edge in the
+       strip's own coordinate frame, measured counter-clockwise
+       from the positive-u axis and expressed on a 0..360 scale.
+
+       0°   is due-east in the strip render   (increasing u)
+       90°  is straight up                    (increasing height)
+       180° is due-west                       (decreasing u)
+       270° is straight down                  (decreasing height)
+
+       The strip frame is the visual frame of the exported drawing,
+       so the numbers match what a reader sees on the page: a cable
+       that climbs to the right reads as 0..90°, one that climbs to
+       the left as 90..180°, and so on.  No sign is ever shown —
+       the full 0..360 circle is used.
+
+       Only wall-edge neighbours contribute an angle.  A floor
+       neighbour would be off-strip and has no visible direction
+       in this view, so it is skipped.  Identical integers collapse
+       to a single line, so a straight run through a mid-cable
+       vertex shows one angle rather than two. */
+    /* ---- optional angle lines --------------------------------
+       When the preview page's "Show cable angles" checkbox is on,
+       every cable edge that touches this cluster contributes one
+       extra line to the pill: the bearing of that edge in the
+       strip's own coordinate frame, measured counter-clockwise
+       from the positive-u axis.
+
+       The scale is zero at the right, +180 and −180 at the left.
+       The two extremes describe the same ray; the sign is what
+       distinguishes the direction of rotation to reach it:
+
+           0°   due-east in the strip render   (increasing u)
+         +90°   straight up                    (increasing height)
+        +180°   due-west, reached from above
+         −90°   straight down                  (decreasing height)
+        −180°   due-west, reached from below
+
+       The strip frame is the visual frame of the exported drawing,
+       so the numbers match what a reader sees on the page.
+
+       Only wall-edge neighbours contribute an angle.  A floor
+       neighbour would be off-strip and has no visible direction
+       in this view, so it is skipped.  Identical integers collapse
+       to a single line, so a straight run through a mid-cable
+       vertex shows one angle rather than two. */
+    if (window.showCableAngles && Array.isArray(orderedIds)) {
+      const memberSet = new Set(grp.map(m => m.aid));
+      const seenAngles = new Set();
+      for (const m of grp) {
+        const idx = orderIdx.get(m.aid);
+        if (typeof idx !== "number") continue;
+        const anchorA = anchors.get(m.aid);
+        if (!anchorA || anchorA.space !== "wall-edge") continue;
+        for (const nIdx of [idx - 1, idx + 1]) {
+          if (nIdx < 0 || nIdx >= orderedIds.length) continue;
+          const nId = orderedIds[nIdx];
+          if (memberSet.has(nId)) continue;
+          const anchorB = anchors.get(nId);
+          if (!anchorB || anchorB.space !== "wall-edge") continue;
+
+          /* Strip-frame deltas: u is the unrolled perimeter
+             coordinate, v is the anchor's height.  Same (u, v)
+             frame the strip is drawn in, so the resulting angle
+             matches the visual render. */
+          const uA = wallAttachToU(anchorA.segIdx, anchorA.t);
+          const vA = anchorA.v || 0;
+          const uB = wallAttachToU(anchorB.segIdx, anchorB.t);
+          const vB = anchorB.v || 0;
+          const du = uB - uA;
+          const dv = vB - vA;
+          if (Math.hypot(du, dv) < 1e-3) continue;
+
+          /* atan2 already gives a counter-clockwise signed angle
+             from the +u axis in (−180, 180], which is exactly the
+             convention the pill shows: 0 at the right, positive
+             for rotations into the upper half, negative for the
+             lower half, and ±180 meeting at the left. */
+          const ang = Math.atan2(dv, du) * 180 / Math.PI;
+          const rounded = Math.round(ang);
+          if (seenAngles.has(rounded)) continue;
+          seenAngles.add(rounded);
+
+          let text;
+          if (rounded === 0) {
+            text = "0\u00B0";
+          } else if (rounded > 0) {
+            text = "+" + rounded + "\u00B0";
+          } else {
+            text = rounded + "\u00B0";
+          }
+          /* The ∠ line names the pill the angle points AT — the
+             neighbour this vertex's cable segment connects to, which
+             is the pill whose anchor is nId.  If the neighbour is on
+             a pill that the collinear filter removed, we still show
+             the angle but drop the name rather than show a label that
+             does not correspond to any drawn pill. */
+          const neighbourPillName = anchorPillName.get(nId);
+          const leftText = neighbourPillName
+            ? "\u2220 " + neighbourPillName
+            : "\u2220";
+          lines.push({ left: leftText, right: text });
+        }
       }
     }
 
@@ -344,6 +508,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       h: lines.length * LINE_H + PAD_Y * 2,
       name,
       members: grp.map(x => x.aid),
+      fontSize: VLABEL_FONT_SIZE,
     });
   }
   c.restore();
@@ -463,6 +628,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       placed: [], maxTrack: -1, topPad: 0,
       trackOffsets: [], trackHeights: [],
       PAD_X, PAD_Y, LINE_H,
+      fontSize: VLABEL_FONT_SIZE,
       pillNameOf,
       areaX0: AREA_X0,
       areaX1: AREA_X1,
@@ -711,6 +877,7 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     trackOffsets,
     trackHeights,
     PAD_X, PAD_Y, LINE_H,
+    fontSize: VLABEL_FONT_SIZE,
     pillNameOf,
     areaX0: AREA_X0,
     areaX1: AREA_X1,
@@ -721,7 +888,8 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
 
 function drawVertexLabels(c, placement, stripY, stripH) {
   if (!placement.placed.length) return;
-  const { placed, PAD_X, PAD_Y, LINE_H, topPad, trackOffsets } = placement;
+  const { placed, PAD_X, PAD_Y, LINE_H, topPad, trackOffsets,
+          fontSize } = placement;
   const stripBottom = stripY + stripH;
 
   const pillTopYFor = (it) =>
@@ -731,7 +899,17 @@ function drawVertexLabels(c, placement, stripY, stripH) {
      text is drawn in whatever font the caller last set — usually the
      subtitle's 13 px / 600-weight stack — and a right-aligned label
      overflows the pill's right edge by a few pixels. */
-  c.font = "700 12px " + FONT_MONO;
+  c.font = VLABEL_FONT_WEIGHT + " " + fontSize + "px " + FONT_MONO;
+
+  /* Name-box geometry, all scaled from the font size.  Both the
+     horizontal padding and the box height move with fontSize, so a
+     bump to VLABEL_FONT_SIZE grows the box, the pill, and the line
+     pitch together instead of leaving the box stranded at a fixed
+     pixel size. */
+  const namePadX    = Math.max(2, fontSize * VLABEL_BOXPAD_RATIO);
+  const nameBoxH    = fontSize * VLABEL_BOXH_RATIO;
+  const nameStrokeW = Math.max(0.9, fontSize / 12);
+  const nameTopAir  = fontSize * VLABEL_BOX_TOPAIR_RATIO;
 
   for (const it of placed) {
     const pillTopY = pillTopYFor(it);
@@ -751,6 +929,30 @@ function drawVertexLabels(c, placement, stripY, stripH) {
       if (line.left) {
         c.textAlign = "left";
         c.fillText(line.left, rx + PAD_X, ty);
+
+        /* Box around the pill name.  Width is measured from the
+           actual glyphs at the current font, so a wider face widens
+           the box; height and stroke scale from fontSize.  The box
+           is centred on the line's text baseline (`ty`), which keeps
+           it symmetric around the text at any size. */
+        if (line.isName) {
+          const lw   = c.measureText(line.left).width;
+          const boxW = lw + 2 * namePadX;
+          const boxX = rx + PAD_X - namePadX;
+
+          /* Top edge is pushed up by nameTopAir and the height grows
+             to match, so the bottom edge — and therefore the text
+             position — does not move.  This balances the two gaps
+             around the caps: monospace faces carry descender space
+             below the baseline that makes a symmetric box read as
+             tight at the top and loose at the bottom. */
+          const boxY = ty - nameBoxH / 2 - nameTopAir;
+          const boxH = nameBoxH + nameTopAir;
+
+          c.strokeStyle = "#000000";
+          c.lineWidth   = nameStrokeW;
+          c.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+        }
       }
       if (line.right) {
         c.textAlign = "right";
