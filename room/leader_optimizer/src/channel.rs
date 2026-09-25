@@ -1,8 +1,17 @@
 use crate::types::*;
 
 /// Faithful port of `_buildChannelToPill` (pg_export_optimizer.py).
+///
+/// The descent column is `descent_x`, which may differ from the
+/// pill's centre `pill_x` by an offset the caller has chosen to
+/// separate this leader's vertical from a foreign leader's.  The
+/// blockers check, the probe direction, and the detour columns all
+/// key off `descent_x`; the final `[pill_x, pill_top_y]` point is
+/// only emitted when the descent column and the pill's centre
+/// actually differ, so a leader with `offset_p = 0` produces exactly
+/// the path it did before the offset was introduced.
 pub fn build_channel_to_pill(
-    pill_x: f64, chan_y: f64, pill_top_y: f64,
+    descent_x: f64, pill_x: f64, chan_y: f64, pill_top_y: f64,
     self_idx: usize,
     placed: &[PlacedItem],
     strip_bottom: f64, top_pad: f64, track_offsets: &[f64],
@@ -27,10 +36,20 @@ pub fn build_channel_to_pill(
 
     let mut blockers: Vec<Aabb> = Vec::new();
     for b in &boxes {
-        if pill_x >= b.ql - eps && pill_x <= b.qr + eps { blockers.push(*b); }
+        if descent_x >= b.ql - eps && descent_x <= b.qr + eps {
+            blockers.push(*b);
+        }
     }
+
+    // No blockers on the descent column: straight down from the
+    // channel to the pill's top, plus a short horizontal to the
+    // pill's actual centre if the descent column is offset.
     if blockers.is_empty() {
-        return vec![Point { x: pill_x, y: pill_top_y }];
+        let mut out = vec![Point { x: descent_x, y: pill_top_y }];
+        if (descent_x - pill_x).abs() > 0.5 {
+            out.push(Point { x: pill_x, y: pill_top_y });
+        }
+        return out;
     }
 
     blockers.sort_by(|a, b| a.qt.partial_cmp(&b.qt).unwrap());
@@ -49,7 +68,8 @@ pub fn build_channel_to_pill(
     bands.push(cur);
 
     let h_clear = |y: f64, xa: f64, xb: f64| -> bool {
-        let lo = xa.min(xb); let hi = xa.max(xb);
+        let lo = xa.min(xb);
+        let hi = xa.max(xb);
         for b in &boxes {
             if b.qt - eps > y || b.qb + eps < y { continue; }
             if b.qr < lo || b.ql > hi { continue; }
@@ -58,7 +78,8 @@ pub fn build_channel_to_pill(
         true
     };
     let v_clear = |x: f64, ya: f64, yb: f64| -> bool {
-        let lo = ya.min(yb); let hi = ya.max(yb);
+        let lo = ya.min(yb);
+        let hi = ya.max(yb);
         for b in &boxes {
             if b.ql - eps > x || b.qr + eps < x { continue; }
             if b.qb <= lo || b.qt >= hi { continue; }
@@ -76,23 +97,30 @@ pub fn build_channel_to_pill(
         if entry_y >= exit_y - 0.5 { continue; }
 
         if entry_y > cur_y + 0.5 {
-            out.push(Point { x: pill_x, y: entry_y });
+            out.push(Point { x: descent_x, y: entry_y });
         }
 
         let left_x  = band.ql - m;
         let right_x = band.qr + m;
-        let prefer_right = (right_x - pill_x) < (pill_x - left_x);
-        let order = if prefer_right { [right_x, left_x] } else { [left_x, right_x] };
+        let prefer_right = (right_x - descent_x) < (descent_x - left_x);
+        let order = if prefer_right {
+            [right_x, left_x]
+        } else {
+            [left_x, right_x]
+        };
 
         let mut detour_x: Option<f64> = None;
         for &base in &order {
-            let dir = if base > pill_x { 1.0 } else { -1.0 };
+            let dir = if base > descent_x { 1.0 } else { -1.0 };
             let mut probe = base;
             for _ in 0..60 {
                 if v_clear(probe, entry_y, exit_y)
-                    && h_clear(entry_y, pill_x, probe)
-                    && h_clear(exit_y,  pill_x, probe)
-                { detour_x = Some(probe); break; }
+                    && h_clear(entry_y, descent_x, probe)
+                    && h_clear(exit_y,  descent_x, probe)
+                {
+                    detour_x = Some(probe);
+                    break;
+                }
                 probe += dir * 6.0;
             }
             if detour_x.is_some() { break; }
@@ -102,18 +130,23 @@ pub fn build_channel_to_pill(
         if bias != 0.0 {
             let biased = dxv + bias;
             if v_clear(biased, entry_y, exit_y)
-                && h_clear(entry_y, pill_x, biased)
-                && h_clear(exit_y,  pill_x, biased)
-            { dxv = biased; }
+                && h_clear(entry_y, descent_x, biased)
+                && h_clear(exit_y,  descent_x, biased)
+            {
+                dxv = biased;
+            }
         }
 
-        out.push(Point { x: dxv,    y: entry_y });
-        out.push(Point { x: dxv,    y: exit_y  });
-        out.push(Point { x: pill_x, y: exit_y  });
+        out.push(Point { x: dxv,       y: entry_y });
+        out.push(Point { x: dxv,       y: exit_y  });
+        out.push(Point { x: descent_x, y: exit_y  });
         cur_y = exit_y;
     }
 
     if pill_top_y > cur_y + 0.5 {
+        out.push(Point { x: descent_x, y: pill_top_y });
+    }
+    if (descent_x - pill_x).abs() > 0.5 {
         out.push(Point { x: pill_x, y: pill_top_y });
     }
     out

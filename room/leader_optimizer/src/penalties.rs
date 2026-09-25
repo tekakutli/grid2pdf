@@ -153,14 +153,16 @@ pub fn corner_feature(
     let chan_y = strip_h + it.channel_y_rel;
     let pill_top_y = strip_h + top_pad + track_offsets[it.track];
     let base = crate::path::compute_leader_path(
-        it.anchor_cx, anchor_y, it.offset_a,
+        it.anchor_cx, anchor_y, it.offset_a, it.offset_p,
         chan_y, it.pill_center_x, pill_top_y,
         self_idx, placed, strip_h, top_pad, track_offsets, it.dive_mode,
     );
 
     if base.len() < 3 {
         let p = base.get(0).copied().unwrap_or(Point { x: 0.0, y: 0.0 });
-        return CornerFeature { x0: p.x, y0: p.y, x1: p.x, y1: p.y, path_idx: self_idx };
+        return CornerFeature {
+            x0: p.x, y0: p.y, x1: p.x, y1: p.y, path_idx: self_idx,
+        };
     }
 
     let (a, c, n, b) = if which == 0 {
@@ -171,13 +173,17 @@ pub fn corner_feature(
     };
 
     if b < BEVEL_MIN_APPLY {
-        return CornerFeature { x0: c.x, y0: c.y, x1: c.x, y1: c.y, path_idx: self_idx };
+        return CornerFeature {
+            x0: c.x, y0: c.y, x1: c.x, y1: c.y, path_idx: self_idx,
+        };
     }
     let len_a = ((c.x - a.x).powi(2) + (c.y - a.y).powi(2)).sqrt();
     let len_b = ((n.x - c.x).powi(2) + (n.y - c.y).powi(2)).sqrt();
     let bu = b.min(len_a * 0.85).min(len_b * 0.85);
     if bu < BEVEL_MIN_APPLY || len_a < 1e-6 || len_b < 1e-6 {
-        return CornerFeature { x0: c.x, y0: c.y, x1: c.x, y1: c.y, path_idx: self_idx };
+        return CornerFeature {
+            x0: c.x, y0: c.y, x1: c.x, y1: c.y, path_idx: self_idx,
+        };
     }
     let t1 = (len_a - bu) / len_a;
     let t2 = bu / len_b;

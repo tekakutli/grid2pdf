@@ -5,3 +5,7 @@ tmp/
 
 # Rust build artifacts
 room/leader_optimizer/target/
+
+# Other
+room/cable_playground.html
+room/boxes_playground.html

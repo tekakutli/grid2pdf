@@ -148,7 +148,7 @@ function hugOverhangingLeaders(placed, stripAreaX0, stripAreaX1,
     const chanY    = stripH + (it.channelYRel || 0);
     const pillTopY = stripH + topPad + trackOffsets[it.track];
     const base = computeLeaderPath(
-      it.anchorCx, it.anchorCyRel, it.offsetA || 0,
+      it.anchorCx, it.anchorCyRel, it.offsetA || 0, it.offsetP || 0,
       chanY, it.pillCenterX, pillTopY,
       it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
     const bevelled = _bevelPath(base, it.bevel0 || 0, it.bevel1 || 0);
@@ -424,29 +424,6 @@ async function computeVertexLabelPlacement(c, chunks, stripOffsetX,
        every cable edge that touches this cluster contributes one
        extra line to the pill: the bearing of that edge in the
        strip's own coordinate frame, measured counter-clockwise
-       from the positive-u axis and expressed on a 0..360 scale.
-
-       0°   is due-east in the strip render   (increasing u)
-       90°  is straight up                    (increasing height)
-       180° is due-west                       (decreasing u)
-       270° is straight down                  (decreasing height)
-
-       The strip frame is the visual frame of the exported drawing,
-       so the numbers match what a reader sees on the page: a cable
-       that climbs to the right reads as 0..90°, one that climbs to
-       the left as 90..180°, and so on.  No sign is ever shown —
-       the full 0..360 circle is used.
-
-       Only wall-edge neighbours contribute an angle.  A floor
-       neighbour would be off-strip and has no visible direction
-       in this view, so it is skipped.  Identical integers collapse
-       to a single line, so a straight run through a mid-cable
-       vertex shows one angle rather than two. */
-    /* ---- optional angle lines --------------------------------
-       When the preview page's "Show cable angles" checkbox is on,
-       every cable edge that touches this cluster contributes one
-       extra line to the pill: the bearing of that edge in the
-       strip's own coordinate frame, measured counter-clockwise
        from the positive-u axis.
 
        The scale is zero at the right, +180 and −180 at the left.
@@ -544,6 +521,7 @@ async function computeVertexLabelPlacement(c, chunks, stripOffsetX,
       name,
       members: grp.map(x => x.aid),
       fontSize: VLABEL_FONT_SIZE,
+      offsetP: 0,
     });
   }
   c.restore();
@@ -1021,6 +999,7 @@ function drawVertexLabels(c, placement, stripY, stripH) {
     const chanY    = stripBottom + it.channelYRel;
     const pillTopY = pillTopYFor(it);
     const offA     = it.offsetA || 0;
+    const offP     = it.offsetP || 0;
 
     let path;
     if (it.finalPath) {
@@ -1032,7 +1011,7 @@ function drawVertexLabels(c, placement, stripY, stripH) {
       path = it.finalPath.map(p => [p[0], p[1] + stripY]);
     } else {
       const basePath = computeLeaderPath(
-        anchorX, anchorY, offA, chanY, pillX, pillTopY,
+        anchorX, anchorY, offA, offP, chanY, pillX, pillTopY,
         it, placed, stripBottom, topPad, trackOffsets, it.diveMode || 0);
       const bevelled = _bevelPath(basePath, it.bevel0 || 0, it.bevel1 || 0);
       path = _applyJogsToPath(bevelled, it);

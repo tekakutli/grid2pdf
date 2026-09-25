@@ -46,10 +46,22 @@ worse one.
 The detour bias
 ---------------
 The tail — the descent from the channel down to the pill — is built
-by _buildChannelToPill from pillX, chanY and pillTopY.  When a
-blocker sits on the pillX column, the tail jogs around it.  detourBias
-shifts the entire detour rectangle sideways, applied only when the
-biased column is still clear of every foreign box.
+by _buildChannelToPill from descentX, chanY and pillTopY.  When a
+blocker sits on the descent column, the tail jogs around it.
+detourBias shifts the entire detour rectangle sideways, applied only
+when the biased column is still clear of every foreign box.
+
+The descent offset (offsetP)
+----------------------------
+offsetP decouples the tail's descent column from the pill's centre:
+the tail descends at pillX + offsetP instead of at pillX.  This is
+the fix for two leaders on different tracks whose pills happen to
+land at nearly the same x — the pill push nudges the pill, but the
+descent column has always followed the pill exactly, so the two
+tails end up drawn as one thick vertical.  A small nonzero offsetP
+splits them without moving the pill.  Set by
+separateCrossTrackDescents in pg_export_pillpush.py, and carried
+through _buildChannelToPill, computeLeaderPath, and _buildLeaderPathRel.
 
 The conflicted-leader filter
 ----------------------------
@@ -117,9 +129,11 @@ box.
 
 The channel-to-pill tail
 ------------------------
-A tail goes from (pillX, chanY) to (pillX, pillTopY), jogging around
-each foreign-pill band on the pillX column.  entryY and exitY are
-clamped to [chanY, pillTopY].
+A tail goes from (descentX, chanY) to (descentX, pillTopY), jogging
+around each foreign-pill band on the descent column, then takes one
+last short horizontal to (pillX, pillTopY) if the descent column and
+the pill's centre differ.  entryY and exitY are clamped to
+[chanY, pillTopY].
 
 Jog-direction guard
 -------------------
@@ -143,7 +157,7 @@ const OPT_MAX_PASSES  = 8;
    CHANNEL-TO-PILL TAIL
    ========================================================================== */
 
-function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
+function _buildChannelToPill(descentX, pillX, chanY, pillTopY, self, placed,
                               stripBottom, topPad, trackOffsets) {
   const M = 4;
   const EPS = 2;
@@ -165,9 +179,15 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
 
   const blockers = [];
   for (const b of boxes) {
-    if (pillX >= b.qL - EPS && pillX <= b.qR + EPS) blockers.push(b);
+    if (descentX >= b.qL - EPS && descentX <= b.qR + EPS) blockers.push(b);
   }
-  if (!blockers.length) return [[pillX, pillTopY]];
+  if (!blockers.length) {
+    const out = [[descentX, pillTopY]];
+    if (Math.abs(descentX - pillX) > 0.5) {
+      out.push([pillX, pillTopY]);
+    }
+    return out;
+  }
 
   blockers.sort((a, b) => a.qT - b.qT);
   const bands = [];
@@ -215,23 +235,22 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     if (entryY >= exitY - 0.5) continue;
 
     if (entryY > curY + 0.5) {
-      out.push([pillX, entryY]);
-      curY = entryY;
+      out.push([descentX, entryY]);
     }
 
     const leftX  = band.qL - M;
     const rightX = band.qR + M;
-    const preferRight = (rightX - pillX) < (pillX - leftX);
+    const preferRight = (rightX - descentX) < (descentX - leftX);
     const tryOrder = preferRight ? [rightX, leftX] : [leftX, rightX];
 
     let detourX = null;
     for (const base of tryOrder) {
-      const dir = base > pillX ? 1 : -1;
+      const dir = base > descentX ? 1 : -1;
       let probe = base;
       for (let k = 0; k < 60; k++) {
         if (vClear(probe, entryY, exitY) &&
-            hClear(entryY, pillX, probe) &&
-            hClear(exitY,  pillX, probe)) {
+            hClear(entryY, descentX, probe) &&
+            hClear(exitY,  descentX, probe)) {
           detourX = probe;
           break;
         }
@@ -246,43 +265,49 @@ function _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
     if (bias !== 0) {
       const biased = detourX + bias;
       if (vClear(biased, entryY, exitY) &&
-          hClear(entryY, pillX, biased) &&
-          hClear(exitY,  pillX, biased)) {
+          hClear(entryY, descentX, biased) &&
+          hClear(exitY,  descentX, biased)) {
         detourX = biased;
       }
     }
 
     out.push([detourX, entryY]);
     out.push([detourX, exitY]);
-    out.push([pillX,   exitY]);
+    out.push([descentX, exitY]);
     curY = exitY;
   }
 
   if (pillTopY > curY + 0.5) {
+    out.push([descentX, pillTopY]);
+  }
+  if (Math.abs(descentX - pillX) > 0.5) {
     out.push([pillX, pillTopY]);
   }
   return out;
 }
 
-function computeLeaderPath(anchorX, anchorY, offA, chanY, pillX, pillTopY,
+function computeLeaderPath(anchorX, anchorY, offA, offP, chanY,
+                           pillX, pillTopY,
                            self, placed, stripBottom, topPad, trackOffsets,
                            diveMode) {
   const mode = diveMode || 0;
+  const descentX = pillX + (offP || 0);
   const path = [];
   path.push([anchorX, anchorY]);
   if (mode === 1) {
     path.push([anchorX, chanY]);
-    path.push([pillX,   chanY]);
+    path.push([descentX, chanY]);
   } else if (mode === 2) {
-    path.push([pillX, anchorY]);
-    path.push([pillX, chanY]);
+    path.push([descentX, anchorY]);
+    path.push([descentX, chanY]);
   } else {
     path.push([anchorX + offA, chanY]);
-    path.push([pillX,          chanY]);
+    path.push([descentX,       chanY]);
   }
 
-  const tail = _buildChannelToPill(pillX, chanY, pillTopY, self, placed,
-                                    stripBottom, topPad, trackOffsets);
+  const tail = _buildChannelToPill(descentX, pillX, chanY, pillTopY,
+                                    self, placed, stripBottom,
+                                    topPad, trackOffsets);
   for (const p of tail) path.push(p);
   return path;
 }
@@ -292,7 +317,7 @@ function _buildLeaderPathRel(it, placed, stripH, topPad, trackOffsets) {
   const chanY    = stripH + it.channelYRel;
   const pillTopY = stripH + topPad + trackOffsets[it.track];
   return computeLeaderPath(
-    it.anchorCx, anchorY, it.offsetA || 0,
+    it.anchorCx, anchorY, it.offsetA || 0, it.offsetP || 0,
     chanY, it.pillCenterX, pillTopY,
     it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
 }

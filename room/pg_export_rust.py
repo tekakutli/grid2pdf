@@ -65,6 +65,7 @@ window.__optimizeLeadersOnServer = async function (placed, opts) {
          zero because the Rust side resets and recomputes them all;
          sending the JS-side current values would be wasted bytes. */
       offsetA:      0,
+      offsetP:      0,
       bevel0:       0,
       bevel1:       0,
       jog0:         0,
@@ -106,6 +107,7 @@ window.__optimizeLeadersOnServer = async function (placed, opts) {
       const o = out[i];
       placed[i].channelYRel = o.channelYRel;
       placed[i].offsetA     = o.offsetA;
+      placed[i].offsetP     = o.offsetP;
       placed[i].bevel0      = o.bevel0;
       placed[i].bevel1      = o.bevel1;
       placed[i].jog0        = o.jog0;

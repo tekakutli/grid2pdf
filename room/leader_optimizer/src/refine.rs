@@ -2,6 +2,12 @@ use crate::constants::*;
 use crate::types::*;
 
 /// Faithful port of `refineLeaderOffsets` (pg_export_primitives.py).
+///
+/// Resets `offset_a` and `offset_p` on every item before the fan-out
+/// pass.  `offset_p` is not moved here — it is moved by
+/// `separate_cross_track_descents` in pillpush.rs — but it must be
+/// zeroed here so a stale value from a previous run cannot survive
+/// into a fresh export.
 pub fn refine_leader_offsets(
     placed: &mut [PlacedItem], strip_h: f64, _top_pad: f64, _track_offsets: &[f64],
 ) {
@@ -11,6 +17,7 @@ pub fn refine_leader_offsets(
 
     for it in placed.iter_mut() {
         it.offset_a = 0.0;
+        it.offset_p = 0.0;
     }
     if placed.len() < 2 { return; }
 

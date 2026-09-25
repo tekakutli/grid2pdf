@@ -86,7 +86,6 @@ pub fn push_pills_for_leader_conflicts(
             if (best_x - orig_x).abs() > 1e-9 { any_moved = true; }
 
             if best_n > 0 {
-                // Find involved foreign leaders.
                 let layout3 = build_layout(placed, strip_h, top_pad, track_offsets);
                 let mut involved: Vec<usize> = Vec::new();
                 for j in 0..placed.len() {
@@ -136,7 +135,10 @@ pub fn push_pills_for_leader_conflicts(
                         if n < f_best_n { f_best_n = n; f_best = f_orig + dx; }
                     }
                     placed[j].pill_center_x = f_best;
-                    if (f_best - f_orig).abs() > 1e-9 { any_moved = true; best_n = f_best_n; }
+                    if (f_best - f_orig).abs() > 1e-9 {
+                        any_moved = true;
+                        best_n = f_best_n;
+                    }
                 }
             }
         }
@@ -322,9 +324,7 @@ pub fn reroute_double_crossings_by_hugging(
     }
 }
 
-/// Faithful port of `hugOverhangingLeaders`.  Final pass — reshapes
-/// overhanging leaders onto interior "hugging" lanes without touching
-/// the two endpoints.
+/// Faithful port of `hugOverhangingLeaders`.
 pub fn hug_overhanging_leaders(
     placed: &mut [PlacedItem],
     strip_area_x0: f64, strip_area_x1: f64,
@@ -337,13 +337,12 @@ pub fn hug_overhanging_leaders(
     struct Work { idx: usize, path: Vec<Point>, side: u8, depth: f64 }
     let mut work: Vec<Work> = Vec::new();
 
-    // Snapshot the current per-leader paths.
     for i in 0..placed.len() {
         let it = &placed[i];
         let chan_y = strip_h + it.channel_y_rel;
         let pill_top_y = strip_h + top_pad + track_offsets[it.track];
         let base = compute_leader_path(
-            it.anchor_cx, it.anchor_cy_rel, it.offset_a,
+            it.anchor_cx, it.anchor_cy_rel, it.offset_a, it.offset_p,
             chan_y, it.pill_center_x, pill_top_y,
             i, placed, strip_h, top_pad, track_offsets, it.dive_mode,
         );
@@ -434,25 +433,128 @@ pub fn hug_overhanging_leaders(
     }
 }
 
+/// How much horizontal room the pill has on one side before it runs
+/// into a same-track neighbour.  Used by
+/// `separate_cross_track_descents` to pick which of two colliding
+/// descents to nudge.
+fn descent_slack(placed: &[PlacedItem], idx: usize, side: &str) -> f64 {
+    let it = &placed[idx];
+    let my_l = it.pill_center_x - it.w / 2.0;
+    let my_r = it.pill_center_x + it.w / 2.0;
+    let my_track = it.track;
+    let mut nearest_left  = f64::NEG_INFINITY;
+    let mut nearest_right = f64::INFINITY;
+    for (k, other) in placed.iter().enumerate() {
+        if k == idx { continue; }
+        if other.track != my_track { continue; }
+        let o_l = other.pill_center_x - other.w / 2.0;
+        let o_r = other.pill_center_x + other.w / 2.0;
+        if side == "left" && o_r <= my_l {
+            nearest_left = nearest_left.max(o_r);
+        } else if side == "right" && o_l >= my_r {
+            nearest_right = nearest_right.min(o_l);
+        }
+    }
+    if side == "left" {
+        if nearest_left == f64::NEG_INFINITY { 1e6 } else { my_l - nearest_left }
+    } else {
+        if nearest_right == f64::INFINITY { 1e6 } else { nearest_right - my_r }
+    }
+}
+
+/// Separate vertical tails that descend at nearly the same x across
+/// two different tracks.
+///
+/// The pill push nudges the pill horizontally, but the tail's descent
+/// column has always been hard-wired to the pill's centre — so two
+/// pills on different tracks whose x happens to land within
+/// `SEG_MIN_SEP` of each other produce two parallel verticals that
+/// read as one thick stroke.  `offset_p` decouples the descent column
+/// from the pill's centre; this pass nudges `offset_p` until the two
+/// descents are separated, preferring to move whichever pill has more
+/// horizontal room to spare on its own track.
+///
+/// Runs after the pill push each polish round, so it sees the final
+/// pill positions.  Same-track pairs are skipped — their descents go
+/// to the same row and are already separated by the same-track pill
+/// guard in `separate_pills_in_tracks`.
+fn separate_cross_track_descents(
+    placed: &mut [PlacedItem],
+    _strip_h: f64, top_pad: f64, track_offsets: &[f64],
+) {
+    const MIN_SEP: f64 = SEG_MIN_SEP;
+    const MIN_Y_OVERLAP: f64 = 5.0;
+    const MAX_ITERS: usize = 6;
+
+    for _ in 0..MAX_ITERS {
+        let mut any_moved = false;
+        let n = placed.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if placed[i].track == placed[j].track { continue; }
+
+                let ax = placed[i].pill_center_x + placed[i].offset_p;
+                let bx = placed[j].pill_center_x + placed[j].offset_p;
+                if (ax - bx).abs() >= MIN_SEP { continue; }
+
+                // Strip-relative y ranges of the two descents: from
+                // each leader's channel down to the top of its pill.
+                let a_top = placed[i].channel_y_rel;
+                let a_bot = top_pad + track_offsets[placed[i].track];
+                let b_top = placed[j].channel_y_rel;
+                let b_bot = top_pad + track_offsets[placed[j].track];
+                let lo_y = a_top.max(b_top);
+                let hi_y = a_bot.min(b_bot);
+                if hi_y - lo_y < MIN_Y_OVERLAP { continue; }
+
+                let dx = bx - ax;
+                let sgn = if dx >= 0.0 { 1.0 } else { -1.0 };
+                let push = (MIN_SEP - (ax - bx).abs()) / 2.0 + 0.5;
+
+                let a_slack = descent_slack(placed, i, "left")
+                            + descent_slack(placed, i, "right");
+                let b_slack = descent_slack(placed, j, "left")
+                            + descent_slack(placed, j, "right");
+
+                if a_slack >= b_slack {
+                    placed[i].offset_p -= sgn * push;
+                } else {
+                    placed[j].offset_p += sgn * push;
+                }
+                any_moved = true;
+            }
+        }
+        if !any_moved { break; }
+    }
+}
+
 /// Faithful port of `polishLeaderLayout` — the alternating loop of
-/// optimize / reroute-hug / pill-push, with best-state preservation.
+/// optimize / reroute-hug / pill-push / descent-separation, with
+/// best-state preservation.
 pub fn polish_leader_layout(
     placed: &mut [PlacedItem],
     strip_h: f64, top_pad: f64, track_offsets: &[f64],
     boundaries: &[f64], wire_segments: &[WireSegment], wall_edges: &[WallEdge],
 ) {
-    let ctx_owned = (boundaries.to_vec(), wire_segments.to_vec(), wall_edges.to_vec());
+    let ctx_owned = (
+        boundaries.to_vec(),
+        wire_segments.to_vec(),
+        wall_edges.to_vec(),
+    );
 
-    // Snapshots of the mutable optimiser state.
-    let snap = |p: &[PlacedItem]| -> Vec<(f64, f64, f64, f64, i32, f64, f64, f64, f64)> {
+    // (bevel0, bevel1, jog0, jog1, dive_mode, channel_y_rel,
+    //  offset_a, offset_p, detour_bias, pill_center_x)
+    type Snap = Vec<(f64, f64, f64, f64, i32, f64, f64, f64, f64, f64)>;
+
+    let snap = |p: &[PlacedItem]| -> Snap {
         p.iter().map(|x| (
             x.bevel0, x.bevel1, x.jog0, x.jog1,
-            x.dive_mode, x.channel_y_rel, x.offset_a, x.detour_bias,
-            x.pill_center_x,
+            x.dive_mode, x.channel_y_rel,
+            x.offset_a, x.offset_p,
+            x.detour_bias, x.pill_center_x,
         )).collect()
     };
-    let restore = |p: &mut [PlacedItem],
-                   s: &[(f64, f64, f64, f64, i32, f64, f64, f64, f64)]| {
+    let restore = |p: &mut [PlacedItem], s: &Snap| {
         for (i, t) in s.iter().enumerate() {
             p[i].bevel0 = t.0;
             p[i].bevel1 = t.1;
@@ -461,8 +563,9 @@ pub fn polish_leader_layout(
             p[i].dive_mode = t.4;
             p[i].channel_y_rel = t.5;
             p[i].offset_a = t.6;
-            p[i].detour_bias = t.7;
-            p[i].pill_center_x = t.8;
+            p[i].offset_p = t.7;
+            p[i].detour_bias = t.8;
+            p[i].pill_center_x = t.9;
         }
     };
 
@@ -490,6 +593,8 @@ pub fn polish_leader_layout(
                                             boundaries, wire_segments, wall_edges);
         push_pills_for_leader_conflicts(placed, strip_h, top_pad, track_offsets,
                                         ctx_owned.clone());
+        // Runs last so it sees the final pill x positions.
+        separate_cross_track_descents(placed, strip_h, top_pad, track_offsets);
 
         let now = count(placed);
         if now < best_score {

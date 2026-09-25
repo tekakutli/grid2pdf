@@ -4,30 +4,31 @@ use crate::geometry::js_sign;
 use crate::types::*;
 
 pub fn compute_leader_path(
-    anchor_x: f64, anchor_y: f64, off_a: f64,
+    anchor_x: f64, anchor_y: f64, off_a: f64, off_p: f64,
     chan_y: f64, pill_x: f64, pill_top_y: f64,
     self_idx: usize, placed: &[PlacedItem],
     strip_bottom: f64, top_pad: f64, track_offsets: &[f64],
     dive_mode: i32,
 ) -> Vec<Point> {
+    let descent_x = pill_x + off_p;
     let mut path = Vec::new();
     path.push(Point { x: anchor_x, y: anchor_y });
     match dive_mode {
         1 => {
-            path.push(Point { x: anchor_x, y: chan_y });
-            path.push(Point { x: pill_x,   y: chan_y });
+            path.push(Point { x: anchor_x,  y: chan_y });
+            path.push(Point { x: descent_x, y: chan_y });
         }
         2 => {
-            path.push(Point { x: pill_x, y: anchor_y });
-            path.push(Point { x: pill_x, y: chan_y });
+            path.push(Point { x: descent_x, y: anchor_y });
+            path.push(Point { x: descent_x, y: chan_y });
         }
         _ => {
             path.push(Point { x: anchor_x + off_a, y: chan_y });
-            path.push(Point { x: pill_x,          y: chan_y });
+            path.push(Point { x: descent_x,       y: chan_y });
         }
     }
     for p in build_channel_to_pill(
-        pill_x, chan_y, pill_top_y, self_idx, placed,
+        descent_x, pill_x, chan_y, pill_top_y, self_idx, placed,
         strip_bottom, top_pad, track_offsets,
     ) {
         path.push(p);
@@ -43,7 +44,7 @@ pub fn build_leader_path_rel(
     let chan_y = strip_h + it.channel_y_rel;
     let pill_top_y = strip_h + top_pad + track_offsets[it.track];
     compute_leader_path(
-        it.anchor_cx, anchor_y, it.offset_a,
+        it.anchor_cx, anchor_y, it.offset_a, it.offset_p,
         chan_y, it.pill_center_x, pill_top_y,
         self_idx, placed, strip_h, top_pad, track_offsets,
         it.dive_mode,
@@ -141,8 +142,6 @@ pub fn apply_jogs_to_path(path: &[Point], it: &PlacedItem) -> Vec<Point> {
     p
 }
 
-/// Faithful port of `_candidatesFor`.  Returns f64 candidate values for
-/// a bevel or jog field.
 pub fn candidates_for(cur: f64, is_bevel: bool) -> Vec<f64> {
     let step = if is_bevel { BEVEL_STEP } else { JOG_STEP };
     let max_v = if is_bevel { BEVEL_MAX } else { JOG_MAX };
@@ -169,7 +168,6 @@ pub fn candidates_for(cur: f64, is_bevel: bool) -> Vec<f64> {
     }
     if cur != 0.0 { set.push(0.0); }
 
-    // dedupe, drop == cur
     let mut out: Vec<f64> = Vec::with_capacity(set.len());
     for s in set {
         if (s - cur).abs() < 1e-9 { continue; }

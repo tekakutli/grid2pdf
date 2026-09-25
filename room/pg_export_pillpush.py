@@ -86,6 +86,22 @@ The pass runs inside polishLeaderLayout between
 optimizeLeaderGeometry and pushPillsForLeaderConflicts, once per
 round, so a hug-cleaned layout is what the pill push then refines.
 
+Cross-track descent separation
+------------------------------
+The pill push nudges the pill horizontally, but the tail's descent
+column has always been hard-wired to the pill's centre — so two
+pills on different tracks whose x happens to land within
+SEG_MIN_SEP of each other produce two parallel verticals that
+read as one thick stroke.  offsetP decouples the descent column
+from the pill's centre; separateCrossTrackDescents nudges offsetP
+until the two descents are separated, preferring to move whichever
+pill has more horizontal room to spare on its own track.
+
+Runs after the pill push each polish round, so it sees the final
+pill positions.  Same-track pairs are skipped — their descents go
+to the same row and are already separated by the same-track pill
+guard in _separatePillsInTracks.
+
 Best-state preservation in the polish loop
 ------------------------------------------
 Each round of the polish loop starts with optimizeLeaderGeometry,
@@ -112,7 +128,7 @@ function buildPathSegsFor(it, placed, stripH, topPad, trackOffsets) {
   const chanY    = stripH + (it.channelYRel || 0);
   const pillTopY = stripH + topPad + trackOffsets[it.track];
   const base = computeLeaderPath(
-    it.anchorCx, it.anchorCyRel, it.offsetA || 0,
+    it.anchorCx, it.anchorCyRel, it.offsetA || 0, it.offsetP || 0,
     chanY, it.pillCenterX, pillTopY,
     it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
   const path = _applyJogsToPath(
@@ -505,6 +521,88 @@ function rerouteDoubleCrossingsByHugging(placed, stripH, topPad, trackOffsets,
 }
 
 /* ==========================================================================
+   CROSS-TRACK DESCENT SEPARATION
+   ==========================================================================
+   See the module docstring for the reasoning.  In one sentence: two
+   tails on different tracks whose descent columns land within
+   SEG_MIN_SEP of each other read as one thick stroke; nudge one
+   leader's offsetP — the horizontal distance between its descent
+   column and its pill's centre — until they separate, preferring the
+   leader with more room on its own track. */
+
+function _descentSlack(placed, idx, side) {
+  const it = placed[idx];
+  const myL = it.pillCenterX - it.w / 2;
+  const myR = it.pillCenterX + it.w / 2;
+  const myTrack = it.track;
+  let nearestLeft  = -Infinity;
+  let nearestRight = Infinity;
+  for (let k = 0; k < placed.length; k++) {
+    if (k === idx) continue;
+    const other = placed[k];
+    if (other.track !== myTrack) continue;
+    const oL = other.pillCenterX - other.w / 2;
+    const oR = other.pillCenterX + other.w / 2;
+    if (side === "left" && oR <= myL) {
+      nearestLeft = Math.max(nearestLeft, oR);
+    } else if (side === "right" && oL >= myR) {
+      nearestRight = Math.min(nearestRight, oL);
+    }
+  }
+  if (side === "left") {
+    return nearestLeft === -Infinity ? 1e6 : myL - nearestLeft;
+  }
+  return nearestRight === Infinity ? 1e6 : nearestRight - myR;
+}
+
+function _separateCrossTrackDescents(placed, stripH, topPad, trackOffsets) {
+  const MIN_SEP       = SEG_MIN_SEP;
+  const MIN_Y_OVERLAP = 5;
+  const MAX_ITERS     = 6;
+
+  for (let iter = 0; iter < MAX_ITERS; iter++) {
+    let anyMoved = false;
+    const n = placed.length;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (placed[i].track === placed[j].track) continue;
+
+        const ax = placed[i].pillCenterX + (placed[i].offsetP || 0);
+        const bx = placed[j].pillCenterX + (placed[j].offsetP || 0);
+        if (Math.abs(ax - bx) >= MIN_SEP) continue;
+
+        /* Strip-relative y ranges of the two descents: from each
+           leader's channel down to the top of its pill. */
+        const aTop = placed[i].channelYRel;
+        const aBot = topPad + trackOffsets[placed[i].track];
+        const bTop = placed[j].channelYRel;
+        const bBot = topPad + trackOffsets[placed[j].track];
+        const loY = Math.max(aTop, bTop);
+        const hiY = Math.min(aBot, bBot);
+        if (hiY - loY < MIN_Y_OVERLAP) continue;
+
+        const dx = bx - ax;
+        const sgn = dx >= 0 ? 1 : -1;
+        const push = (MIN_SEP - Math.abs(dx)) / 2 + 0.5;
+
+        const aSlack = _descentSlack(placed, i, "left")
+                     + _descentSlack(placed, i, "right");
+        const bSlack = _descentSlack(placed, j, "left")
+                     + _descentSlack(placed, j, "right");
+
+        if (aSlack >= bSlack) {
+          placed[i].offsetP = (placed[i].offsetP || 0) - sgn * push;
+        } else {
+          placed[j].offsetP = (placed[j].offsetP || 0) + sgn * push;
+        }
+        anyMoved = true;
+      }
+    }
+    if (!anyMoved) break;
+  }
+}
+
+/* ==========================================================================
    POLISH LOOP
    ========================================================================== */
 
@@ -522,14 +620,15 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
 
   /* Snapshot a full optimiser state.  deepClone covers the fields the
      optimiser mutates: bevel, jog, diveMode, channelYRel, offsetA,
-     detourBias, and pillCenterX.  Everything else — anchorCx, w, h,
-     track — is immutable during the polish loop. */
+     offsetP, detourBias, and pillCenterX.  Everything else —
+     anchorCx, w, h, track — is immutable during the polish loop. */
   const snap = () => placed.map(p => ({
     bevel0: p.bevel0 || 0, bevel1: p.bevel1 || 0,
     jog0:   p.jog0   || 0, jog1:   p.jog1   || 0,
     diveMode: p.diveMode || 0,
     channelYRel: p.channelYRel,
     offsetA:     p.offsetA || 0,
+    offsetP:     p.offsetP || 0,
     detourBias:  p.detourBias || 0,
     pillCenterX: p.pillCenterX,
   }));
@@ -541,6 +640,7 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
       p.diveMode = t.diveMode;
       p.channelYRel = t.channelYRel;
       p.offsetA = t.offsetA;
+      p.offsetP = t.offsetP;
       p.detourBias = t.detourBias;
       p.pillCenterX = t.pillCenterX;
     }
@@ -573,6 +673,9 @@ function polishLeaderLayout(placed, stripH, topPad, trackOffsets,
 
     pushPillsForLeaderConflicts(placed, stripH, topPad, trackOffsets,
                                 obstacleContext);
+
+    /* Runs last so it sees the final pill x positions. */
+    _separateCrossTrackDescents(placed, stripH, topPad, trackOffsets);
 
     const now = count();
     if (now < bestScore) {

@@ -248,7 +248,7 @@ function _cornerFeature(it, placed, stripH, topPad, trackOffsets, which) {
   const chanY    = stripH + (it.channelYRel || 0);
   const pillTopY = stripH + topPad + trackOffsets[it.track];
   const basePath = computeLeaderPath(
-    it.anchorCx, anchorY, it.offsetA || 0,
+    it.anchorCx, anchorY, it.offsetA || 0, it.offsetP || 0,
     chanY, it.pillCenterX, pillTopY,
     it, placed, stripH, topPad, trackOffsets, it.diveMode || 0);
 

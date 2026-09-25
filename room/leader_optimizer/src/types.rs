@@ -54,6 +54,11 @@ pub struct PlacedIn {
     pub pill_center_x: f64,
     pub channel_y_rel: f64,
     #[serde(default)] pub offset_a: f64,
+    /// Horizontal offset of the tail's vertical descent column from
+    /// the pill's centre.  Breaks cross-track descents that would
+    /// otherwise sit at the same x and read as one thick line.
+    /// See `separate_cross_track_descents` in pillpush.rs.
+    #[serde(default)] pub offset_p: f64,
     #[serde(default)] pub bevel0: f64,
     #[serde(default)] pub bevel1: f64,
     #[serde(default)] pub jog0: f64,
@@ -72,6 +77,7 @@ pub struct PlacedItem {
     pub pill_center_x: f64,
     pub channel_y_rel: f64,
     pub offset_a: f64,
+    pub offset_p: f64,
     pub bevel0: f64,
     pub bevel1: f64,
     pub jog0: f64,
@@ -89,7 +95,9 @@ impl From<PlacedIn> for PlacedItem {
             w: p.w, h: p.h, track: p.track,
             pill_center_x: p.pill_center_x,
             channel_y_rel: p.channel_y_rel,
-            offset_a: 0.0, bevel0: 0.0, bevel1: 0.0,
+            offset_a: 0.0,
+            offset_p: 0.0,
+            bevel0: 0.0, bevel1: 0.0,
             jog0: 0.0, jog1: 0.0,
             dive_mode: 0, detour_bias: 0.0,
             final_path: None,
@@ -108,6 +116,7 @@ pub struct PlacedOut {
     pub pill_center_x: f64,
     pub channel_y_rel: f64,
     pub offset_a: f64,
+    pub offset_p: f64,
     pub bevel0: f64,
     pub bevel1: f64,
     pub jog0: f64,
@@ -115,9 +124,7 @@ pub struct PlacedOut {
     pub dive_mode: i32,
     pub detour_bias: f64,
     /// Serialized as `[[x, y], ...]` — the shape the JS renderer
-    /// (drawVertexLabels in pg_export_labels.py) expects.  Not
-    /// `[{"x":.., "y":..}, ...]`, which is what a plain
-    /// `Option<Vec<Point>>` with Point's derive would produce.
+    /// (drawVertexLabels in pg_export_labels.py) expects.
     pub final_path: Option<Vec<[f64; 2]>>,
 }
 
@@ -130,6 +137,7 @@ impl From<PlacedItem> for PlacedOut {
             pill_center_x: p.pill_center_x,
             channel_y_rel: p.channel_y_rel,
             offset_a: p.offset_a,
+            offset_p: p.offset_p,
             bevel0: p.bevel0, bevel1: p.bevel1,
             jog0: p.jog0, jog1: p.jog1,
             dive_mode: p.dive_mode,

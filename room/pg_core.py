@@ -1096,7 +1096,31 @@ function flashStatus(msg, cls) {
 BOOT_JS = r"""
 /* ==========================================================================
    BOOTSTRAP
-   ========================================================================== */
+   ==========================================================================
+
+   The previous ordering called resize() — and therefore draw(), which
+   blocks on the wall→plan arrow solver — synchronously, on an EMPTY
+   model, and only then started the async fetch.  The user saw: canvas
+   appears, pause, cables appear.  Two paints, and the second one had
+   to wait for both the arrow solve that had already happened AND the
+   fetch.
+
+   The ordering below does the fetch first.  resize() still runs before
+   draw() — it is what sizes the canvas, computes layout.floorH /
+   layout.wallH, and sets the transforms fitViews reads — but no draw()
+   has happened yet, so the arrow solver runs exactly once, on the
+   real, cable-loaded model, and the user sees the canvas and its
+   cables in a single paint.
+
+   What changed vs. the original:
+
+       - the synchronous resize() / updateSnapPill() /
+         updateDrawButton() calls are gone
+       - the async IIFE now owns the whole boot: fetch → resize →
+         panel refresh → draw()
+       - the flashStatus call is unconditional in the loaded case (no
+         separate draw() — resize()'s internal draw() already painted
+         the loaded model) */
 
 document.title = T("pageTitle");
 
@@ -1113,17 +1137,21 @@ drawBtnEl.onclick = () => { if (drawing) cancelDraw(false); else beginDraw(); };
 /* Build the junction graph once, before anything that reads it. */
 buildJunctionGraph();
 
-resize();
-updateSnapPill();
-updateDrawButton();
 (async () => {
   const data = await loadFromServer();
+  if (data) applyLoaded(data);
+
+  /* resize() sizes the canvas, computes the layout bands, sets the
+     view transforms, and calls draw() — so the very first paint the
+     user sees already has the loaded cables in it. */
+  resize();
+  updateSnapPill();
+  updateDrawButton();
+
   if (data) {
-    applyLoaded(data);
     const n = state.floorGrids.length + state.wallGrids.length +
               state.floorCables.length + state.wallCables.length;
     if (n) flashStatus(`Loaded ${n} item(s) from ${STATE_FILE}`, "ok");
-    draw();
   }
 })();
 """
