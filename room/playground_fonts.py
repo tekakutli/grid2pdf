@@ -62,8 +62,10 @@ MONO_FALLBACK    = "ui-monospace, Menlo, Consolas, monospace"
 # SANS_FONT_WEIGHT = 400
 # SANS_FALLBACK    = "-apple-system, system-ui, Segoe UI, sans-serif"
 
-SANS_FONT_PATH   = "/usr/share/fonts/WOFF2/FiraCode-Regular.woff2"
-SANS_FONT_FAMILY = "Fira Code"
+SANS_FONT_PATH   = "/home/tekakutli/.local/share/fonts/Chewy/Chewy-Regular.ttf"
+SANS_FONT_FAMILY = "Chewy"
+# SANS_FONT_PATH   = "/usr/share/fonts/WOFF2/FiraCode-Regular.woff2"
+# SANS_FONT_FAMILY = "Fira Code"
 SANS_FONT_WEIGHT = 400
 SANS_FALLBACK    = "-apple-system, system-ui, Segoe UI, sans-serif"
 

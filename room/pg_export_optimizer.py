@@ -1,6 +1,20 @@
 """
 pg_export_optimizer.py — the leader-geometry optimiser.
 
+Fallback status
+---------------
+As of the Rust leader-optimizer port, the functions in this module
+are the JS-side fallback.  On a server whose `leader_optimizer`
+binary is present and resolvable (see cable_server.RUST_BIN), the
+two passes below — pushPillsForLeaderConflicts and
+rerouteDoubleCrossingsByHugging — and the polish loop that drives
+them, polishLeaderLayout, are invoked only via pg_export_rust's
+catch block when the /optimize-leaders round trip fails.  The Rust
+port is a transcription of exactly this code; nothing here has been
+changed by the port, and the two implementations are intended to
+stay behaviourally identical.  If you fix a bug in one, fix it in
+the other.
+
 Six move families, all tried in one pass, plus the jog-direction
 guard that keeps a back-step jog from ever being accepted:
 

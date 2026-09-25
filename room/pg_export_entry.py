@@ -11,8 +11,11 @@ Two things, both tiny:
                            slot)
 
     exportAllCableRuns     the button's click handler: renders every
-                           true cable, collects the failures, opens
-                           the preview page, and flashes a status
+                           true cable (now one async await per cable,
+                           because renderCableRunToCanvas awaits the
+                           Rust leader optimiser over the server),
+                           collects the failures, opens the preview
+                           page, and flashes a status
 
 The status message routes through T() for both the success and the
 partial-failure cases.
@@ -36,7 +39,7 @@ ENTRY_JS = r"""
   btn.addEventListener("click", exportAllCableRuns);
 })();
 
-function exportAllCableRuns() {
+async function exportAllCableRuns() {
   if (!state.trueCables.length) {
     flashStatus(T("noCablesToExport"), "warn");
     return;
@@ -45,7 +48,11 @@ function exportAllCableRuns() {
   const failures = [];
   for (const tc of state.trueCables) {
     try {
-      const result = renderCableRunToCanvas(tc.id);
+      /* Async: the leader-geometry optimiser inside this call is a
+         round-trip to the Rust subroutine on the Python server (or
+         the JS fallback when the binary is absent).  See
+         pg_export_rust.py. */
+      const result = await renderCableRunToCanvas(tc.id);
       if (result && result.canvas) {
         images.push({ id: tc.id, canvas: result.canvas, meta: result.meta });
       } else {

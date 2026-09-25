@@ -199,11 +199,11 @@ function openExportPreview(images) {
      filter runs first inside computeVertexLabelPlacement and may
      remove some pills entirely, then the angle flag decorates the
      survivors. */
-  const rerenderAll = () => {
+  const rerenderAll = async () => {
     for (const tc of state.trueCables) {
       let result = null;
       try {
-        result = renderCableRunToCanvas(tc.id);
+        result = await renderCableRunToCanvas(tc.id);
       } catch (err) {
         console.error("re-render failed for cable " + tc.id, err);
         continue;
@@ -244,17 +244,17 @@ function openExportPreview(images) {
 
   if (filterCb) {
     filterCb.checked = !!window.filterCollinearVerticesInStrip;
-    filterCb.addEventListener("change", () => {
+    filterCb.addEventListener("change", async () => {
       window.filterCollinearVerticesInStrip = filterCb.checked;
-      rerenderAll();
+      await rerenderAll();
     });
   }
 
   if (anglesCb) {
     anglesCb.checked = !!window.showCableAngles;
-    anglesCb.addEventListener("change", () => {
+    anglesCb.addEventListener("change", async () => {
       window.showCableAngles = anglesCb.checked;
-      rerenderAll();
+      await rerenderAll();
     });
   }
 }

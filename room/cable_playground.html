@@ -15489,9 +15489,9 @@ function hugOverhangingLeaders(placed, stripAreaX0, stripAreaX1,
 
 /* ---- Vertex coordinate labels ---- */
 
-function computeVertexLabelPlacement(c, chunks, stripOffsetX,
-                                     stripAreaX0, stripAreaW, stripH,
-                                     orderedIds) {
+async function computeVertexLabelPlacement(c, chunks, stripOffsetX,
+                                           stripAreaX0, stripAreaW, stripH,
+                                           orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
   const FONT  = VLABEL_FONT_WEIGHT + " " + VLABEL_FONT_SIZE + "px " + FONT_MONO;
   const PAD_X = Math.round(VLABEL_FONT_SIZE * VLABEL_PADX_RATIO);
@@ -16039,18 +16039,29 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     : LABEL_CHANNEL_Y0 + (numChannels - 1) * LABEL_CHANNEL_STEP
       + LABEL_CHANNEL_GAP;
 
-  refineLeaderOffsets(placed, topPad, trackOffsets, stripH);
+  /* The three leader-geometry passes that used to run inline here —
+     refineLeaderOffsets, polishLeaderLayout, and
+     hugOverhangingLeaders — have been ported to Rust and are now a
+     single subroutine call to the Python server.  The bridge posts
+     the current `placed` state plus its obstacle context to
+     /optimize-leaders, waits for the optimised fields back, and
+     splices them into `placed` in place.
 
-  polishLeaderLayout(placed, stripH, topPad, trackOffsets,
-                     boundaries, wireSegments, wallEdges);
+     The JS-side versions of all three still exist (in
+     pg_export_primitives, pg_export_pillpush, and this module
+     itself) and are invoked by the bridge's fallback path when the
+     Rust binary is unavailable — so the export still completes,
+     just more slowly.
 
-  /* Overhang-hugging final pass.  Runs after the optimiser, the
-     double-crossing hug pass, and the pill push have all finished,
-     and before the style-conflict graph is built — so a leader that
-     gets clamped to a hugging lane is what the style graph sees,
-     which is what gets drawn.  See hugOverhangingLeaders above. */
-  hugOverhangingLeaders(placed, stripAreaX0, stripAreaX0 + stripAreaW,
-                        stripH, topPad, trackOffsets);
+     This is the async boundary of the whole exporter: every caller
+     of computeVertexLabelPlacement must await the result, which
+     means every caller of renderCableRunToCanvas must await too.
+     See the renderCableRunToCanvas module docstring and the two
+     call sites in pg_export_preview and pg_export_entry. */
+  await window.__optimizeLeadersOnServer(placed, {
+    stripH, topPad, trackOffsets, boundaries, wireSegments, wallEdges,
+    stripAreaX0, stripAreaW,
+  });
 
   const conflictAdj = _buildStyleConflictGraph(placed, stripH, topPad,
                                                 trackOffsets);
@@ -16365,9 +16376,12 @@ function scaleCanvasToWidth(srcCanvas, targetW) {
   return out;
 }
 
-/* ---- Main renderer ---- */
+/* ---- Main renderer ----
 
-function renderCableRunToCanvas(tcId) {
+   Async because computeVertexLabelPlacement now awaits the Rust
+   leader optimiser over POST /optimize-leaders.  Every caller of
+   this function must await it; see the module docstring. */
+async function renderCableRunToCanvas(tcId) {
   const orderedIds = _collapseStripCollinear(linearizeTrueCable(tcId));
   if (orderedIds.length < 1) return null;
 
@@ -16488,7 +16502,10 @@ function renderCableRunToCanvas(tcId) {
                          pillNameOf: new Map() };
   if (stripActive) {
     const measureCtx = document.createElement("canvas").getContext("2d");
-    labelPlacement = computeVertexLabelPlacement(
+    /* Async: the leader-geometry optimiser inside this call is now
+       the Rust subroutine.  See pg_export_labels.py and
+       pg_export_rust.py. */
+    labelPlacement = await computeVertexLabelPlacement(
       measureCtx, chunks, stripOffsetX, stripAreaX0, stripAreaW, STRIP_FIXED_H,
       orderedIds);
   }
@@ -17313,11 +17330,11 @@ function openExportPreview(images) {
      filter runs first inside computeVertexLabelPlacement and may
      remove some pills entirely, then the angle flag decorates the
      survivors. */
-  const rerenderAll = () => {
+  const rerenderAll = async () => {
     for (const tc of state.trueCables) {
       let result = null;
       try {
-        result = renderCableRunToCanvas(tc.id);
+        result = await renderCableRunToCanvas(tc.id);
       } catch (err) {
         console.error("re-render failed for cable " + tc.id, err);
         continue;
@@ -17358,20 +17375,128 @@ function openExportPreview(images) {
 
   if (filterCb) {
     filterCb.checked = !!window.filterCollinearVerticesInStrip;
-    filterCb.addEventListener("change", () => {
+    filterCb.addEventListener("change", async () => {
       window.filterCollinearVerticesInStrip = filterCb.checked;
-      rerenderAll();
+      await rerenderAll();
     });
   }
 
   if (anglesCb) {
     anglesCb.checked = !!window.showCableAngles;
-    anglesCb.addEventListener("change", () => {
+    anglesCb.addEventListener("change", async () => {
       window.showCableAngles = anglesCb.checked;
-      rerenderAll();
+      await rerenderAll();
     });
   }
 }
+
+/* ==========================================================================
+   RUST LEADER-OPTIMIZER BRIDGE
+   ==========================================================================
+   See the module docstring.  The signature is deliberately narrow:
+   one `placed` array (mutated in place), one `opts` object carrying
+   the geometry.  Everything else — the fetch, the JSON shape, the
+   splice-back loop — is an implementation detail of this function. */
+
+window.__optimizeLeadersOnServer = async function (placed, opts) {
+  const payload = {
+    placed: placed.map(it => ({
+      /* Read-only geometry the optimiser needs. */
+      anchorCx:     it.anchorCx,
+      anchorCyRel:  it.anchorCyRel,
+      w:            it.w,
+      h:            it.h,
+      track:        it.track,
+      pillCenterX:  it.pillCenterX,
+      channelYRel:  it.channelYRel,
+      /* These are the mutable optimiser fields.  They go out as
+         zero because the Rust side resets and recomputes them all;
+         sending the JS-side current values would be wasted bytes. */
+      offsetA:      0,
+      bevel0:       0,
+      bevel1:       0,
+      jog0:         0,
+      jog1:         0,
+      diveMode:     0,
+      detourBias:   0,
+    })),
+    stripH:       opts.stripH,
+    topPad:       opts.topPad,
+    trackOffsets: opts.trackOffsets,
+    boundaries:   opts.boundaries,
+    wireSegments: opts.wireSegments.map(w => ({
+      ax: w.ax, ay: w.ay, bx: w.bx, by: w.by,
+    })),
+    wallEdges:    opts.wallEdges.map(w => ({
+      x0: w.x0, x1: w.x1, y: w.y,
+    })),
+    stripAreaX0:  opts.stripAreaX0,
+    stripAreaW:   opts.stripAreaW,
+  };
+
+  try {
+    const r = await fetch("/optimize-leaders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cables: [{ cableId: 0, ...payload }] }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error("HTTP " + r.status + ": " + txt.slice(0, 200));
+    }
+    const data = await r.json();
+    const out = data.cables[0].placed;
+    if (!Array.isArray(out) || out.length !== placed.length) {
+      throw new Error("optimizer returned " + (out ? out.length : "?") +
+                      " placed items, expected " + placed.length);
+    }
+    for (let i = 0; i < placed.length; i++) {
+      const o = out[i];
+      placed[i].channelYRel = o.channelYRel;
+      placed[i].offsetA     = o.offsetA;
+      placed[i].bevel0      = o.bevel0;
+      placed[i].bevel1      = o.bevel1;
+      placed[i].jog0        = o.jog0;
+      placed[i].jog1        = o.jog1;
+      placed[i].diveMode    = o.diveMode;
+      placed[i].detourBias  = o.detourBias;
+      placed[i].pillCenterX = o.pillCenterX;
+      /* finalPath serializes from Rust as [[x, y], ...] or null —
+         the same array-of-pairs shape drawVertexLabels already
+         consumes, so no conversion is needed here. */
+      placed[i].finalPath   = o.finalPath || null;
+    }
+    return true;
+  } catch (e) {
+    console.warn("leader optimizer failed, falling back to JS:", e);
+    /* Graceful degradation — run the JS-side passes in the original
+       order.  The presence of all three functions is guaranteed
+       because pg_export_primitives, pg_export_pillpush, and this
+       same module's siblings are all concatenated into the same
+       script scope before this bridge ever runs. */
+    try {
+      if (typeof refineLeaderOffsets === "function") {
+        refineLeaderOffsets(placed, opts.topPad, opts.trackOffsets,
+                            opts.stripH);
+      }
+      if (typeof polishLeaderLayout === "function") {
+        polishLeaderLayout(placed, opts.stripH, opts.topPad,
+                           opts.trackOffsets,
+                           opts.boundaries, opts.wireSegments,
+                           opts.wallEdges);
+      }
+      if (typeof hugOverhangingLeaders === "function") {
+        hugOverhangingLeaders(placed,
+                              opts.stripAreaX0,
+                              opts.stripAreaX0 + opts.stripAreaW,
+                              opts.stripH, opts.topPad, opts.trackOffsets);
+      }
+    } catch (e2) {
+      console.error("JS fallback leader optimiser also failed:", e2);
+    }
+    return false;
+  }
+};
 
 /* ---- Button + entry point ---- */
 
@@ -17389,7 +17514,7 @@ function openExportPreview(images) {
   btn.addEventListener("click", exportAllCableRuns);
 })();
 
-function exportAllCableRuns() {
+async function exportAllCableRuns() {
   if (!state.trueCables.length) {
     flashStatus(T("noCablesToExport"), "warn");
     return;
@@ -17398,7 +17523,11 @@ function exportAllCableRuns() {
   const failures = [];
   for (const tc of state.trueCables) {
     try {
-      const result = renderCableRunToCanvas(tc.id);
+      /* Async: the leader-geometry optimiser inside this call is a
+         round-trip to the Rust subroutine on the Python server (or
+         the JS fallback when the binary is absent).  See
+         pg_export_rust.py. */
+      const result = await renderCableRunToCanvas(tc.id);
       if (result && result.canvas) {
         images.push({ id: tc.id, canvas: result.canvas, meta: result.meta });
       } else {

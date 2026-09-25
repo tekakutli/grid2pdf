@@ -11,6 +11,20 @@ wall-segment arrow-style table, and the dotted cross-view wires.
 The layout constants (IMG_W, MARGIN, STRIP_FIXED_H, etc.) all live
 inside renderCableRunToCanvas — they describe the one fixed sheet
 this exporter produces and nothing else reads them.
+
+Async boundary
+--------------
+computeVertexLabelPlacement in pg_export_labels.py is now an async
+function: the three leader-geometry passes it used to run in-page
+(refineLeaderOffsets, polishLeaderLayout, hugOverhangingLeaders)
+have been ported to Rust and are invoked via POST /optimize-leaders.
+This file therefore awaits that function, which makes
+renderCableRunToCanvas itself async.
+
+Every caller of renderCableRunToCanvas — exportAllCableRuns in
+pg_export_entry.py and the toolbar's rerenderAll closure inside
+openExportPreview in pg_export_preview.py — must await the result.
+Both are edited alongside this file to do so.
 """
 
 
@@ -94,9 +108,12 @@ function scaleCanvasToWidth(srcCanvas, targetW) {
   return out;
 }
 
-/* ---- Main renderer ---- */
+/* ---- Main renderer ----
 
-function renderCableRunToCanvas(tcId) {
+   Async because computeVertexLabelPlacement now awaits the Rust
+   leader optimiser over POST /optimize-leaders.  Every caller of
+   this function must await it; see the module docstring. */
+async function renderCableRunToCanvas(tcId) {
   const orderedIds = _collapseStripCollinear(linearizeTrueCable(tcId));
   if (orderedIds.length < 1) return null;
 
@@ -217,7 +234,10 @@ function renderCableRunToCanvas(tcId) {
                          pillNameOf: new Map() };
   if (stripActive) {
     const measureCtx = document.createElement("canvas").getContext("2d");
-    labelPlacement = computeVertexLabelPlacement(
+    /* Async: the leader-geometry optimiser inside this call is now
+       the Rust subroutine.  See pg_export_labels.py and
+       pg_export_rust.py. */
+    labelPlacement = await computeVertexLabelPlacement(
       measureCtx, chunks, stripOffsetX, stripAreaX0, stripAreaW, STRIP_FIXED_H,
       orderedIds);
   }

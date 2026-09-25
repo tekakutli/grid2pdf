@@ -2,6 +2,20 @@
 pg_export_pillpush.py — the pill push, the double-crossing hug pass,
 and the polish loop.
 
+Fallback status
+---------------
+As of the Rust leader-optimizer port, the functions in this module
+are the JS-side fallback.  On a server whose `leader_optimizer`
+binary is present and resolvable (see cable_server.RUST_BIN), the
+two passes below — pushPillsForLeaderConflicts and
+rerouteDoubleCrossingsByHugging — and the polish loop that drives
+them, polishLeaderLayout, are invoked only via pg_export_rust's
+catch block when the /optimize-leaders round trip fails.  The Rust
+port is a transcription of exactly this code; nothing here has been
+changed by the port, and the two implementations are intended to
+stay behaviourally identical.  If you fix a bug in one, fix it in
+the other.
+
 When the optimiser's six move families have all been exhausted and a
 leader is still conflicted, the pill is the movable object.
 

@@ -2,7 +2,7 @@
 pg_export.py — aggregator for the print-friendly cable-run exporter.
 
 This file is the aggregator.  The exporter was originally a single
-~2000-line module; it has been split into thirteen submodules by
+~2000-line module; it has been split into fourteen submodules by
 concern, mirroring the split pg_arrows.py uses for the wall→plan
 escape-arrow field:
 
@@ -20,44 +20,33 @@ escape-arrow field:
                           geometry constants, and refineLeaderOffsets
     pg_export_geometry    the pure distance and segment-pair atoms,
                           plus the segment-conflict sweep
-    pg_export_snapshot    _buildLayout and its consumers — the one
-                          build per candidate that keeps the hot
-                          evaluate() loop cheap, and the conflict
-                          counter the optimiser's pass loop uses to
-                          skip clean leaders
-    pg_export_penalties   the tier-list penalty functions:
-                          boundary, wire (parallel vs. crossing),
-                          wall-edge, and corner features
-    pg_export_style       the style-conflict graph — the parallel-
-                          proximity detector that drives the
-                          solid/dashed alternation, and the
-                          bipartite/greedy vertex cover
-    pg_export_optimizer   the leader-geometry optimiser: five move
-                          families (bevel, jog, dive mode, channel-Y
-                          slide, offsetA slide), the exhaustive tier
-                          list in evaluate(), the jog-direction guard
-    pg_export_pillpush    the escape valve — push a leader's own pill
-                          or a conflicting foreign pill to open a
-                          highway — and the polish loop that
-                          alternates the optimiser and the push
+    pg_export_snapshot    _buildLayout and its consumers
+    pg_export_penalties   the tier-list penalty functions
+    pg_export_style       the style-conflict graph
+    pg_export_optimizer   the leader-geometry optimiser (JS fallback)
+    pg_export_pillpush    the escape valve and the polish loop
+                          (JS fallback)
     pg_export_labels      the vertex label placement and draw pass
     pg_export_render      the crop, the rescale, and the main
                           renderCableRunToCanvas
-    pg_export_preview     the preview page — one card per cable,
-                          the download-all buttons, the collinear
-                          filter checkbox
+    pg_export_preview     the preview page
+    pg_export_rust        the bridge to the Rust leader optimiser
     pg_export_entry       the export button and the entry point
 
-Each module is a Python string.  The aggregator concatenates them
-into one <script> tag, so the JS lives in a single flat scope — same
-functions, same names, same call sites as before the split.  Only
-the Python packaging changed; there is no semantic difference.
-
-The full rationale for the leader-routing algorithm — the exhaustive
-overlap-class enumeration, the tier weights, the optimiser move
-vocabulary, the pill push, the polish loop — lives in
-pg_export_optimizer.py and pg_export_pillpush.py.  This file's job is
-just to name the split and stitch the pieces together.
+Rust leader optimiser
+---------------------
+The three passes that used to be the slowest part of an export —
+refineLeaderOffsets, polishLeaderLayout, hugOverhangingLeaders —
+now run in a compiled Rust binary spawned by the Python server as
+POST /optimize-leaders.  pg_export_rust.py carries the JS bridge
+that hands `placed` + the obstacle context to that endpoint and
+splices the result back into the JS state.  The JS-side versions of
+those three functions are still present (in pg_export_primitives,
+pg_export_pillpush, pg_export_labels) so the export still works
+when the Rust binary is unavailable — the bridge falls back to the
+in-page optimiser in that case.  See pg_export_rust.py for the wire
+format and pg_export_labels.computeVertexLabelPlacement for the
+call site.
 
 Deliberately NOT translated (in any module of this split):
 
@@ -80,6 +69,7 @@ from pg_export_pillpush  import PILLPUSH_JS
 from pg_export_labels    import LABELS_JS
 from pg_export_render    import RENDER_JS
 from pg_export_preview   import PREVIEW_JS
+from pg_export_rust      import RUST_JS
 from pg_export_entry     import ENTRY_JS
 
 
@@ -96,5 +86,6 @@ EXPORT_JS = (
     + LABELS_JS
     + RENDER_JS
     + PREVIEW_JS
+    + RUST_JS
     + ENTRY_JS
 )

@@ -1,0 +1,7 @@
+.DS_Store
+.idea
+*.log
+tmp/
+
+# Rust build artifacts
+room/leader_optimizer/target/

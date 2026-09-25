@@ -3,6 +3,7 @@ pg_export_labels.py — vertex label placement and draw.
 
 The one pass that decides where every vertex label pill sits and then
 draws it.  Placement runs once per export, per cable; draw runs once.
+The placement half is now async — see "Async boundary" below.
 
 Placement
 ---------
@@ -11,10 +12,12 @@ Placement
     Phase 2   Interleaved assignment — pill i goes to row (i % n).
     Phase 3   Compress at COMPRESS_GAP, center in the strip.
 
-Then the pass hands the geometry to pg_export_primitives'
-refineLeaderOffsets and pg_export_pillpush's polishLeaderLayout for
-the routing optimiser, and finally computes the style assignment
-using pg_export_style's conflict graph.
+Then the pass hands the geometry to the Rust leader optimiser via
+pg_export_rust's `__optimizeLeadersOnServer`, which runs the three
+passes that used to live here — refineLeaderOffsets,
+polishLeaderLayout, and hugOverhangingLeaders — as a subroutine of
+the Python server.  Finally, the style assignment is computed using
+pg_export_style's conflict graph.
 
 Draw
 ----
@@ -25,6 +28,38 @@ The vertex cover that turns the style graph into a solid/dashed
 assignment lives here, inline, because it produces the last field
 the leader placement ever writes (it.leaderStyle) and because the
 pills and the leaders are drawn in the same pass.
+
+Async boundary
+--------------
+computeVertexLabelPlacement is async: the middle third of its body —
+the three leader-geometry passes — is a round trip to the Python
+server, which in turn spawns the compiled Rust binary.  Every caller
+must await the result.
+
+Callers, and the async propagation each one needs:
+
+    renderCableRunToCanvas   in pg_export_render.py — awaits the
+                             placement and is therefore itself async
+    exportAllCableRuns       in pg_export_entry.py — awaits each
+                             renderCableRunToCanvas in its loop
+    rerenderAll              in pg_export_preview.py — awaits each
+                             renderCableRunToCanvas; its two
+                             checkbox handlers await rerenderAll
+
+The JS-side fallback when the Rust binary is unavailable runs the
+same three passes inline (see pg_export_rust.py), and that path is
+synchronous — the async wrapper exists for the server round trip and
+costs nothing when the fallback is what runs.
+
+Handles for the in-page fallback
+--------------------------------
+The three fallback functions are still defined in the modules that
+originally owned them — refineLeaderOffsets in pg_export_primitives,
+polishLeaderLayout and hugOverhangingLeaders in pg_export_pillpush —
+and their JS is unchanged.  They are the load-bearing path only when
+the server has no `leader_optimizer` binary at the path
+cable_server.RUST_BIN resolves to; on a server that does, they are
+dead code kept for the graceful-degradation case.
 """
 
 
@@ -208,9 +243,9 @@ function hugOverhangingLeaders(placed, stripAreaX0, stripAreaX1,
 
 /* ---- Vertex coordinate labels ---- */
 
-function computeVertexLabelPlacement(c, chunks, stripOffsetX,
-                                     stripAreaX0, stripAreaW, stripH,
-                                     orderedIds) {
+async function computeVertexLabelPlacement(c, chunks, stripOffsetX,
+                                           stripAreaX0, stripAreaW, stripH,
+                                           orderedIds) {
   const fmtCm = (mm) => String(Math.round(mm / 10));
   const FONT  = VLABEL_FONT_WEIGHT + " " + VLABEL_FONT_SIZE + "px " + FONT_MONO;
   const PAD_X = Math.round(VLABEL_FONT_SIZE * VLABEL_PADX_RATIO);
@@ -758,18 +793,29 @@ function computeVertexLabelPlacement(c, chunks, stripOffsetX,
     : LABEL_CHANNEL_Y0 + (numChannels - 1) * LABEL_CHANNEL_STEP
       + LABEL_CHANNEL_GAP;
 
-  refineLeaderOffsets(placed, topPad, trackOffsets, stripH);
+  /* The three leader-geometry passes that used to run inline here —
+     refineLeaderOffsets, polishLeaderLayout, and
+     hugOverhangingLeaders — have been ported to Rust and are now a
+     single subroutine call to the Python server.  The bridge posts
+     the current `placed` state plus its obstacle context to
+     /optimize-leaders, waits for the optimised fields back, and
+     splices them into `placed` in place.
 
-  polishLeaderLayout(placed, stripH, topPad, trackOffsets,
-                     boundaries, wireSegments, wallEdges);
+     The JS-side versions of all three still exist (in
+     pg_export_primitives, pg_export_pillpush, and this module
+     itself) and are invoked by the bridge's fallback path when the
+     Rust binary is unavailable — so the export still completes,
+     just more slowly.
 
-  /* Overhang-hugging final pass.  Runs after the optimiser, the
-     double-crossing hug pass, and the pill push have all finished,
-     and before the style-conflict graph is built — so a leader that
-     gets clamped to a hugging lane is what the style graph sees,
-     which is what gets drawn.  See hugOverhangingLeaders above. */
-  hugOverhangingLeaders(placed, stripAreaX0, stripAreaX0 + stripAreaW,
-                        stripH, topPad, trackOffsets);
+     This is the async boundary of the whole exporter: every caller
+     of computeVertexLabelPlacement must await the result, which
+     means every caller of renderCableRunToCanvas must await too.
+     See the renderCableRunToCanvas module docstring and the two
+     call sites in pg_export_preview and pg_export_entry. */
+  await window.__optimizeLeadersOnServer(placed, {
+    stripH, topPad, trackOffsets, boundaries, wireSegments, wallEdges,
+    stripAreaX0, stripAreaW,
+  });
 
   const conflictAdj = _buildStyleConflictGraph(placed, stripH, topPad,
                                                 trackOffsets);
