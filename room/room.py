@@ -1,26 +1,23 @@
 """
-room.py — parametric model of an irregular room + 2D floor plan
+room.py — parametric model of an irregular room.
 
-The libfontconfig bundled in some pip-installed build123d wheels is older
-than the system one and prints warnings while scanning modern
-/etc/fonts/conf.d/* files.  We mute OS-level stderr (fd 2) around the
-operations that trigger fontconfig — the imports and every Text() call —
-so the console stays clean.  Python tracebacks still work, because fd 2 is
-restored before any exception unwinds past the context manager.
+Defines a room from the MEASUREMENTS block below, resolves it into a
+solid, and writes the artefacts downstream tools consume:
 
-Install:  pip install build123d cairosvg
+    room.step              the built 3D solid
+    room.stl               the same solid, triangulated
+    room_walls.json        the build output — surfaces, planFaces,
+                           columns, steps, openings
+    room_dimensions.json   the declared dimension annotations — the
+                           "W4 = 166" numbers, their dimension-line
+                           endpoints, and the notes-block lines
+
+2D visualization lives in the floor_plan project:
+
+    python floor_plan.py   → floor_plan.svg (+ floor_plan.png)
+
+Install:  pip install build123d
 Run:      python room.py
-Outputs:  room.step, room.stl, floor_plan.svg, floor_plan.png,
-          room_walls.json   (sidecar for downstream tools)
-
-room_walls.json now also carries `planFaces` — the exact 2D section of
-the room solid at PLAN_CUT_Z, as a list of {outer, holes} polygons.
-This is what downstream tools (boxes_playground.py, cable_playground.py)
-should read when they want the room's footprint in plan view: it has
-the corner joins, the opening punches, the column merges, and the
-small-room walls all baked in, because it comes from build123d's own
-section operator rather than from any reconstruction on top of the
-surfaces array.
 """
 
 import json
@@ -33,7 +30,10 @@ from math import hypot, atan2, degrees
 
 @contextmanager
 def _quiet():
-    """Redirect OS-level stderr (fd 2) to /dev/null for the duration of the block."""
+    """Redirect OS-level stderr (fd 2) to /dev/null for the duration
+    of the block.  Used around build123d calls that trigger a noisy
+    libfontconfig bundled in some wheels; restored before any
+    exception unwinds past the context manager."""
     saved = os.dup(2)
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
@@ -50,24 +50,21 @@ with _quiet():
 
 
 # ============================================================================
-# ROOM DESCRIPTION LANGUAGE — declarative MEASUREMENTS
+# MEASUREMENTS
 # ============================================================================
 #
-# Every geometric value in the MEASUREMENTS block is expressed as one of:
+# Every geometric value is expressed as one of:
 #
 #   • a raw number in "units" — UNIT_MM converts to mm (10.0 = cm)
 #   • a named constant from CONSTANTS (e.g. "STEP_DEPTH")
 #   • an anchor to a feature (e.g. "W4.inner.y", "C1.E.x")
 #   • an expression combining them (e.g. "W4.inner.y + 99")
 #
-# Bare offsets in expressions are in units (99 = 99 units = 990 mm).
-# Anchors resolve to absolute mm values.
+# Bare offsets in expressions are in units.  Anchors resolve to
+# absolute mm values.
 #
-# IMPORTANT:  the numbers in GROUND_PERIMETER / SMALL_ROOMS / COLUMNS etc.
-# describe *distances along a walk*, not walls.  The physical surfaces of
-# the room are *calculated* from those distances: an opening punches a
-# hole, a step shifts the wall's z-band, and a column against a wall
-# splits the wall into distinct visible segments.  See _dump_wall_json().
+# The numbers below describe *distances along a walk*, not walls.
+# Physical surfaces are *calculated* from them — see _dump_wall_json.
 # ============================================================================
 
 
@@ -187,59 +184,14 @@ OPENINGS = [
      "width": 70.0, "height": 210.0, "sill": "STEP_HEIGHT"},
 ]
 
-# ---------------------------------------------------------------------------
-# Presentation tunables (not part of the room description)
-# ---------------------------------------------------------------------------
 
-FONT_PATH         = "/usr/share/fonts/noto/NotoSans-Regular.ttf"
-TAG_PREFIX        = "W"
-LABEL_SIZE        = 16.0
-SR_LABEL_SIZE     = 9.0
-STEP_LABEL_SIZE   = 9.0
-TAG_INSET         = 60.0
-SR_TAG_INSET      = 20.0
-DIM_GAP           = 30.0
-DIM_SIZE          = 14.0
-COLUMN_LABEL_SIZE = 9.0
-COL_DIM_GAP       = 12.0
-DOOR_LABEL_INSET  = 50.0
-SR_DIM_GAP        = 8.0
+# ============================================================================
+# BUILD TUNING — helper tolerances used during solid construction only
+# ============================================================================
 
-ARROW_SIZE        = 8.0
-CHAR_ASPECT       = 0.55
-LABEL_HEIGHT_FACT = 0.75
-
-LAYOUT_ITERATIONS = 300
-LAYOUT_SPRING     = 0.05
-LAYOUT_REPULSE    = 0.55
-LAYOUT_WALL_PUSH  = 0.35
-LAYOUT_MARGIN     = 3.0
-
-HOST_PARALLEL_TOL   = 0.02
-HOST_COLLINEAR_TOL  = 20.0
-HOST_OVERLAP_MIN    = 0.05
-
-COLUMN_CLIP_EPS     = 1.0
-
-NOTES_LABEL_SIZE    = 10.0
-NOTES_LINE_SPACING  = 1.5
-NOTES_GAP_FACTOR    = 5.0
-NOTES_LINE_MARGIN   = 20.0
-NOTES_MAX_CELLS     = 700
-
-WALL_COLOR = (0, 0, 0)
-TEXT_COLOR = (0, 0, 0)
-LINE_COLOR = (217, 26, 26)
-
-PNG_SCALE = 0.5
-PNG_BG    = "white"
-
-TAG_OVERRIDES = {
-    "W4": (-240.0 * UNIT_MM, -50.0 * UNIT_MM),
-    "W5": (-160.0 * UNIT_MM, -80.0 * UNIT_MM),
-    "W6": (-90.0 * UNIT_MM, 80.0 * UNIT_MM),
-    "D1": (-20.0 * UNIT_MM, 40.0 * UNIT_MM),
-}
+HOST_PARALLEL_TOL  = 0.02
+HOST_COLLINEAR_TOL = 20.0
+HOST_OVERLAP_MIN   = 0.05
 
 
 # ============================================================================
@@ -462,45 +414,24 @@ PLAN_CUT_Z  = CONSTANTS["PLAN_CUT_Z"]
 
 
 # ============================================================================
-# DUMP WALL DEFINITIONS FOR DOWNSTREAM TOOLS (e.g. cable_playground.py)
+# WALL DEFINITIONS FOR DOWNSTREAM TOOLS
 # ============================================================================
 #
-# Schema v4 — "walls are calculated, not declared".
+# Schema v4.  Walls are calculated, not declared: the MEASUREMENTS
+# block is a walk, and the emitted surfaces are derived from that walk
+# plus the features placed on it.  A column sitting flush against a
+# wall physically occupies a slice of that wall, so the wall is split
+# at the column's footprint and the covered slice is dropped; the
+# column contributes its own room-facing sides.  Each surface carries:
 #
-# v3 introduced z-bands so a single 2D footprint could carry several
-# vertical surfaces (wall-above-step, wall-above-door, ...).
-#
-# v4 takes the next step: the MEASUREMENTS block is understood as a walk,
-# and the emitted surfaces are DERIVED from that walk plus the features
-# placed on it.  In particular, a column sitting flush against a wall
-# physically occupies a slice of that wall — from inside the room you see
-# the column's face, not the wall behind it — so the wall is *split* at
-# the column's footprint and the covered slice is dropped.  A wall with
-# one column on it becomes two separate walls; a wall fully hidden by a
-# column (e.g. the short unnamed return between W8 and W3, which is
-# entirely inside C1) produces no wall surface at all.  The column
-# contributes its own room-facing sides as ``kind="column"`` surfaces.
-#
-# Each surface therefore carries:
 #     {tag, p1, p2, z_range_mm, kind, parent}
 #
-# and the pieces of a wall that were originally one MEASUREMENTS entry
-# share that entry's tag — the JSON just has more of them.
-#
-# In addition to the surfaces, v4 dumps:
-#   * openings       — every door/window
-#   * columns        — plan-position boxes
-#   * steps          — step footprint outlines and heights
-#   * planFaces      — the exact 2D section of the room solid at
-#                      PLAN_CUT_Z, as a list of {outer, holes} polygons.
-#                      This is the authoritative plan-view footprint and
-#                      is what downstream tools should read when they
-#                      want "the shape of the walls in plan".  The
-#                      surfaces array is still useful for tools that
-#                      need per-piece metadata (z-bands, tags, parents),
-#                      but the corner joins and the column merges are
-#                      already correct in planFaces — do not try to
-#                      reconstruct them from surfaces.
+# Pieces of a wall that were originally one MEASUREMENTS entry share
+# that entry's tag — the JSON just has more of them.  planFaces carries
+# the actual 2D section at PLAN_CUT_Z, with corner joins, opening
+# punches, and column merges already resolved.  That is what
+# downstream tools should read when they want "the shape of the walls
+# in plan"; the surfaces array is for per-piece metadata.
 #
 # Polarity contract: each emitted (p1, p2) is oriented so that when the
 # unfolded wall strip is laid out with u increasing left→right, the
@@ -512,13 +443,7 @@ PLAN_CUT_Z  = CONSTANTS["PLAN_CUT_Z"]
 
 
 def _wire_to_polygon(wire, tol=0.01):
-    """Trace a build123d Wire into an ordered [[x, y], ...] polygon.
-
-    Returns an empty list if the wire has fewer than three vertices.
-    The trace walks the edges, always following the free end, and
-    drops a duplicated closing point.  This is the same routine the
-    cable project's cable_geometry.py uses; it is reimplemented here so
-    room.py does not depend on that module."""
+    """Trace a build123d Wire into an ordered [[x, y], ...] polygon."""
     edges = list(wire.edges())
     if not edges:
         return []
@@ -580,12 +505,6 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
         return list(poly) if a2 >= 0 else list(reversed(poly))
 
     def _normalize_polarity(p1, p2):
-        """Orient a wall/step segment so its direction in the unfolded
-        strip matches its visual alignment in the eagle view:
-
-            • E–W walls run west → east
-            • N–S walls run south → north
-        """
         dx = abs(p2[0] - p1[0])
         dy = abs(p2[1] - p1[1])
         if dx >= dy:
@@ -597,8 +516,6 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
         return p1, p2
 
     def _split_by_covers(seg, covers, tol=0.5):
-        """Return sub-segments of `seg` that are NOT covered by any of the
-        axis-aligned segments in `covers`."""
         info = _orient(*seg, tol=tol)
         if info is None:
             return [seg]
@@ -649,52 +566,36 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
         return out
 
     def _column_overlap_on_wall(wp1, wp2, col_box, tol=0.5, probe=5.0):
-        """If the column box sits flush against the wall and lies on the
-        room side of it, return (t_lo, t_hi) — the range along the wall
-        (in mm, from wp1) that the column physically covers.  Otherwise
-        None.
-
-        Detection:  one of the column's four axis-aligned edges must be
-        collinear with the wall, and a probe point pushed `probe` mm from
-        the wall's midpoint towards the room's interior must land inside
-        the column's footprint.
-        """
         x0, y0, x1, y1 = col_box
         wdx = wp2[0] - wp1[0]; wdy = wp2[1] - wp1[1]
         wL = hypot(wdx, wdy)
         if wL < 1e-6:
             return None
         wux, wuy = wdx / wL, wdy / wL
-        wnx, wny = -wuy, wux           # wall normal (left of direction)
-        # For a CCW-oriented edge, the room is on the left: the room-side
-        # normal is the same as the left normal.
+        wnx, wny = -wuy, wux
         rnx, rny = wnx, wny
 
-        edges = [((x0, y0), (x1, y0)),   # south
-                 ((x1, y0), (x1, y1)),   # east
-                 ((x1, y1), (x0, y1)),   # north
-                 ((x0, y1), (x0, y0))]   # west
+        edges = [((x0, y0), (x1, y0)),
+                 ((x1, y0), (x1, y1)),
+                 ((x1, y1), (x0, y1)),
+                 ((x0, y1), (x0, y0))]
         for cp1, cp2 in edges:
             cdx = cp2[0] - cp1[0]; cdy = cp2[1] - cp1[1]
             cL = hypot(cdx, cdy)
             if cL < 1e-6:
                 continue
             cux, cuy = cdx / cL, cdy / cL
-            # Parallel?
             if abs(cux * wuy - cuy * wux) > 0.02:
                 continue
-            # Collinear with the wall's line?
             perp = (cp1[0] - wp1[0]) * wnx + (cp1[1] - wp1[1]) * wny
             if abs(perp) > tol:
                 continue
-            # Projection onto the wall's direction
             t1 = (cp1[0] - wp1[0]) * wux + (cp1[1] - wp1[1]) * wuy
             t2 = (cp2[0] - wp1[0]) * wux + (cp2[1] - wp1[1]) * wuy
             tlo = max(0.0, min(t1, t2))
             thi = min(wL, max(t1, t2))
             if thi - tlo < tol:
                 continue
-            # Is the column on the room side of the wall?
             tmid = (tlo + thi) * 0.5
             px = wp1[0] + wux * tmid + rnx * probe
             py = wp1[1] + wuy * tmid + rny * probe
@@ -794,7 +695,7 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
         face = make_face(Polyline(*s["_outline"], close=True))
         regions = face if regions is None else regions + face
 
-    raw_step_edges = []   # (step_tag, step_h_mm, p1, p2) — CCW
+    raw_step_edges = []
     if regions is not None:
         for face in regions.faces():
             outer = face.outer_wire()
@@ -915,14 +816,8 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
         wall_opening_feats[wall_idx].append((tlo, thi, sill, top))
 
     # ---------- wall ↔ column overlays ----------------------------------
-    # A column sitting flush against a wall occupies a slice of that wall.
-    # From inside the room you see the column's face, not the wall behind
-    # it — so we treat the column's footprint as a full-height opening:
-    # the wall is split into pieces and the covered slice is dropped.  The
-    # column's own room-facing sides are emitted below as kind="column".
     n_col_overlaps = 0
     for idx, (_tag, wp1, wp2, _k, _p) in enumerate(all_wall_edges):
-        # Only split actual walls / small-room walls — not column faces.
         if _k != "wall":
             continue
         for col in COLUMNS:
@@ -1034,36 +929,14 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
                  float(col["_box"][2]), float(col["_box"][3])],
     } for col in COLUMNS]
 
-    # ---------- step footprints (v4 addition) ---------------------------
-    # The `surfaces` array only carries the step RISERS — the parts of a
-    # step's boundary that are not covered by a wall.  A consumer that
-    # wants the step's FOOTPRINT (the plan-view region, e.g. the boxes
-    # playground's light-blue hatch) has no way to reconstruct it from
-    # risers alone, because the wall-covered parts of the boundary are
-    # missing.  `steps` closes that gap by carrying the source outline
-    # verbatim.
+    # ---------- step footprints -----------------------------------------
     steps_data = [{
         "tag":       s["tag"],
         "outline":   [[float(p[0]), float(p[1])] for p in s["_outline"]],
         "height_mm": float(s["_height"] * UNIT_MM),
     } for s in STEPS]
 
-    # ---------- plan section at cut height (v4 addition) ----------------
-    # The `surfaces` array carries the wall pieces as inner-face line
-    # segments.  A consumer that wants the room's FOOTPRINT in plan
-    # view — walls, columns, small-room walls, all as filled polygons
-    # at cut height — could reconstruct that from the segments plus
-    # the columns plus the small-room walls, but that reconstruction
-    # is fiddly and error-prone: corners need proper joins, openings
-    # leave gaps, columns that sit flush against a wall need to be
-    # merged with it, and the small-room walls need to be added
-    # separately.
-    #
-    # `planFaces` closes that gap by carrying the actual section of
-    # the room solid at PLAN_CUT_Z, extracted here while the solid is
-    # still in hand.  Consumer code that wants plan geometry just
-    # reads it: the corner joins, the opening punches, the column
-    # merges, and the small-room walls are all already correct.
+    # ---------- plan section at cut height ------------------------------
     plan_cut_z_mm = CONSTANTS["PLAN_CUT_Z"] * UNIT_MM
     plan_faces = []
     try:
@@ -1109,8 +982,85 @@ def _dump_wall_json(room_solid, path="room_walls.json"):
           f"{len(plan_faces)} plan face(s))")
 
 
+def _dump_dimensions_json(path="room_dimensions.json"):
+    """Emit the declared dimension annotations.
+
+    A flat bag of entries — one per declared measurement — carrying
+    the tag, the two points its dimension line runs between (with any
+    extend_to override already applied), the value in source units,
+    and a `kind` presentation hint ("main" vs "small").  No
+    vocabulary from the MEASUREMENTS block leaks through: this is
+    just a list of annotated segments."""
+    dims = []
+
+    for i in range(len(INNER_PTS)):
+        tag = MAIN_TAGS[i]
+        entry = WALL_DIMS_RESOLVED[i]
+        if tag is None or entry is None:
+            continue
+        value, extend_to = entry
+        p1 = INNER_PTS[i]
+        p2 = INNER_PTS[(i + 1) % len(INNER_PTS)]
+        if extend_to is not None:
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            if abs(dy) > abs(dx):
+                p2 = (p2[0], extend_to)
+            else:
+                p2 = (extend_to, p2[1])
+        dims.append({
+            "tag":   tag,
+            "p1":    [float(p1[0]), float(p1[1])],
+            "p2":    [float(p2[0]), float(p2[1])],
+            "value": float(value),
+            "kind":  "main",
+        })
+
+    for sr in SMALL_ROOMS:
+        pts  = sr["_pts"]
+        tags = sr["_wall_tags"]
+        vals = sr["dims"]
+        for i, tag in enumerate(tags):
+            if not tag:
+                continue
+            if i >= len(vals) or vals[i] is None:
+                continue
+            p1 = pts[i]
+            p2 = pts[(i + 1) % len(pts)]
+            try:
+                value = float(vals[i])
+            except (TypeError, ValueError):
+                value = str(vals[i])
+            dims.append({
+                "tag":   tag,
+                "p1":    [float(p1[0]), float(p1[1])],
+                "p2":    [float(p2[0]), float(p2[1])],
+                "value": value,
+                "kind":  "small",
+            })
+
+    notes = [
+        {"label": "Room height",    "value": f"{CONSTANTS['WALL_HEIGHT']:g}"},
+        {"label": "Step rise",
+         "value": f"{max((s['_height'] for s in STEPS), default=0.0):g}"},
+        {"label": "Wall thickness", "value": f"{CONSTANTS['WALL_THICK']:g}"},
+        {"label": "Floor slab",     "value": f"{CONSTANTS['FLOOR_THICK']:g}"},
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "version":    1,
+            "unit_mm":    UNIT_MM,
+            "dimensions": dims,
+            "notes":      notes,
+        }, f, indent=2)
+
+    print(f"Wrote {path}  ({len(dims)} dimension(s), "
+          f"{len(notes)} note(s))")
+
+
 # ============================================================================
-# HELPERS
+# BUILD HELPERS
 # ============================================================================
 
 ALIGN_MIN = (Align.MIN, Align.MIN, Align.MIN)
@@ -1124,10 +1074,25 @@ def point_in_polygon(pt, poly):
     for i in range(n):
         xi, yi = poly[i]
         xj, yj = poly[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+        if ((yi > y) != (yj > y)) and \
+           (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
             inside = not inside
         j = i
     return inside
+
+
+def inward_normal(p1, p2, poly, probe):
+    x1, y1 = p1
+    x2, y2 = p2
+    dx, dy = x2 - x1, y2 - y1
+    L = hypot(dx, dy)
+    nx, ny = dy / L, -dx / L
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    for sign in (1, -1):
+        if point_in_polygon((mx + sign * nx * probe,
+                             my + sign * ny * probe), poly):
+            return sign * nx, sign * ny
+    return nx, ny
 
 
 def to_ccw(poly):
@@ -1202,351 +1167,6 @@ def build_wall_ring(inner_pts_mm, wall_t_mm, height_mm, skip_edge=None):
     return result
 
 
-def inward_normal(p1, p2, poly, probe):
-    x1, y1 = p1
-    x2, y2 = p2
-    dx, dy = x2 - x1, y2 - y1
-    L = hypot(dx, dy)
-    nx, ny = dy / L, -dx / L
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    for sign in (1, -1):
-        if point_in_polygon((mx + sign * nx * probe, my + sign * ny * probe), poly):
-            return sign * nx, sign * ny
-    return nx, ny
-
-
-def label(text, x, y, size, rotation=0.0):
-    with _quiet():
-        t = Text(text, font_size=size, font_path=FONT_PATH,
-                 align=(Align.CENTER, Align.CENTER))
-    if rotation:
-        t = t.rotate(Axis.Z, rotation)
-    return Pos(x, y, 0) * t
-
-
-class Label:
-    def __init__(self, text, preferred, target, size):
-        self.text = text
-        self.preferred = (float(preferred[0]), float(preferred[1]))
-        self.target = target
-        self.size = size
-        self.hw = CHAR_ASPECT * size * len(text) / 2.0
-        self.hh = LABEL_HEIGHT_FACT * size
-        self.pos = [self.preferred[0], self.preferred[1]]
-
-
-def dim_label(text, target, size, direction, arrow_size):
-    hw = CHAR_ASPECT * size * len(text) / 2.0
-    hh = LABEL_HEIGHT_FACT * size
-    dx, dy = direction
-    box_extent = abs(dx) * hw + abs(dy) * hh
-    offset = box_extent + arrow_size
-    preferred = (target[0] + dx * offset, target[1] + dy * offset)
-    return Label(text, preferred, target, size)
-
-
-def _seg_point_dist(p1, p2, q):
-    px, py = q
-    x1, y1 = p1
-    x2, y2 = p2
-    dx, dy = x2 - x1, y2 - y1
-    L2 = dx * dx + dy * dy
-    if L2 < 1e-9:
-        return hypot(px - x1, py - y1), (x1, y1)
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
-    cx, cy = x1 + t * dx, y1 + t * dy
-    return hypot(px - cx, py - cy), (cx, cy)
-
-
-def relax_labels(labels, obstacles, iterations=LAYOUT_ITERATIONS,
-                 spring=LAYOUT_SPRING, repulse=LAYOUT_REPULSE,
-                 wall_push=LAYOUT_WALL_PUSH, margin=LAYOUT_MARGIN):
-    n = len(labels)
-    for _ in range(iterations):
-        fx = [0.0] * n
-        fy = [0.0] * n
-        for i, l in enumerate(labels):
-            fx[i] += (l.preferred[0] - l.pos[0]) * spring
-            fy[i] += (l.preferred[1] - l.pos[1]) * spring
-        for i in range(n):
-            a = labels[i]
-            for j in range(i + 1, n):
-                b = labels[j]
-                dx = b.pos[0] - a.pos[0]
-                dy = b.pos[1] - a.pos[1]
-                ox = (a.hw + b.hw + margin) - abs(dx)
-                oy = (a.hh + b.hh + margin) - abs(dy)
-                if ox > 0 and oy > 0:
-                    if ox < oy:
-                        s = 1.0 if dx >= 0 else -1.0
-                        push = ox * repulse
-                        fx[i] -= s * push
-                        fx[j] += s * push
-                    else:
-                        s = 1.0 if dy >= 0 else -1.0
-                        push = oy * repulse
-                        fy[i] -= s * push
-                        fy[j] += s * push
-        for i, l in enumerate(labels):
-            r = max(l.hw, l.hh)
-            limit = r + margin
-            for (p1, p2) in obstacles:
-                d, closest = _seg_point_dist(p1, p2, l.pos)
-                if 1e-6 < d < limit:
-                    ux = (l.pos[0] - closest[0]) / d
-                    uy = (l.pos[1] - closest[1]) / d
-                    push = (limit - d) * wall_push
-                    fx[i] += ux * push
-                    fy[i] += uy * push
-        for i, l in enumerate(labels):
-            l.pos[0] += fx[i]
-            l.pos[1] += fy[i]
-
-
-def leader_from_box(center, hw, hh, target, arrow_size, pad=2.0):
-    tx, ty = center
-    wx, wy = target
-    dx, dy = wx - tx, wy - ty
-    L = hypot(dx, dy)
-    if L < 1e-6:
-        return []
-    ux, uy = dx / L, dy / L
-    t_x = hw / abs(ux) if abs(ux) > 1e-9 else float("inf")
-    t_y = hh / abs(uy) if abs(uy) > 1e-9 else float("inf")
-    t = min(t_x, t_y) + pad
-    if t >= L:
-        return []
-    sx = tx + ux * t
-    sy = ty + uy * t
-    px, py = -uy, ux
-    bx = wx - ux * arrow_size
-    by = wy - uy * arrow_size
-    w1 = (bx + px * arrow_size * 0.5, by + py * arrow_size * 0.5)
-    w2 = (bx - px * arrow_size * 0.5, by - py * arrow_size * 0.5)
-    return [Line((sx, sy), (wx, wy)), Line(w1, (wx, wy)), Line(w2, (wx, wy))]
-
-
-def dimension(p1, p2, poly, gap):
-    (x1, y1), (x2, y2) = p1, p2
-    ix, iy = inward_normal(p1, p2, poly, gap)
-    nx, ny = -ix, -iy
-    ex1, ey1 = x1 + nx * gap, y1 + ny * gap
-    ex2, ey2 = x2 + nx * gap, y2 + ny * gap
-    segs = [((x1, y1), (ex1, ey1)),
-            ((x2, y2), (ex2, ey2)),
-            ((ex1, ey1), (ex2, ey2))]
-    lines = [Line(a, b) for a, b in segs]
-    mid = ((ex1 + ex2) / 2, (ey1 + ey2) / 2)
-    return lines, segs, mid
-
-
-def simple_dimension(p1, p2, offset_dir, gap):
-    (x1, y1), (x2, y2) = p1, p2
-    nx, ny = offset_dir
-    ex1, ey1 = x1 + nx * gap, y1 + ny * gap
-    ex2, ey2 = x2 + nx * gap, y2 + ny * gap
-    segs = [((x1, y1), (ex1, ey1)),
-            ((x2, y2), (ex2, ey2)),
-            ((ex1, ey1), (ex2, ey2))]
-    lines = [Line(a, b) for a, b in segs]
-    dim_mid = ((ex1 + ex2) / 2, (ey1 + ey2) / 2)
-    return lines, segs, dim_mid
-
-
-def make_wall_opening(p1, p2, poly, offset_along, width, z0, height,
-                      wall_t, pad=30.0):
-    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-    L = hypot(dx, dy)
-    ux, uy = dx / L, dy / L
-    ix, iy = inward_normal(p1, p2, poly, wall_t)
-    ox, oy = -ix, -iy
-    cx = p1[0] + ux * (offset_along + width / 2) + ox * (wall_t / 2)
-    cy = p1[1] + uy * (offset_along + width / 2) + oy * (wall_t / 2)
-    cz = z0 + height / 2
-    angle = degrees(atan2(dy, dx))
-    box = Box(width, wall_t + 2 * pad, height)
-    box = box.rotate(Axis.Z, angle)
-    return Pos(cx, cy, cz) * box
-
-
-# ============================================================================
-# NOTES BLOCK
-# ============================================================================
-
-def build_notes_lines():
-    pairs = [
-        ("Room height",   f"{CONSTANTS['WALL_HEIGHT']:g}"),
-        ("Step rise",     f"{max(s['_height'] for s in STEPS):g}"
-                          if STEPS else "—"),
-        ("Wall thickness", f"{CONSTANTS['WALL_THICK']:g}"),
-        ("Floor slab",    f"{CONSTANTS['FLOOR_THICK']:g}"),
-    ]
-    key_w = max(len(k) for k, _ in pairs)
-    body = [f"{k.ljust(key_w)}  {v}" for k, v in pairs]
-    title = "GENERAL NOTES"
-    rule = "=" * len(title)
-    width = max([len(title)] + [len(b) for b in body])
-    title = title.ljust(width)
-    rule = rule.ljust(width)
-    body = [b.ljust(width) for b in body]
-    return [title, rule] + body
-
-
-def place_notes_block(lines, font_size, obstacles, labels):
-    if not lines:
-        return [], None
-    line_h = font_size * NOTES_LINE_SPACING
-    block_w = CHAR_ASPECT * font_size * max(len(l) for l in lines)
-    block_h = line_h * len(lines)
-    margin = font_size * NOTES_GAP_FACTOR
-
-    xs, ys = [], []
-    for (p1, p2) in obstacles:
-        xs.append(p1[0]); xs.append(p2[0])
-        ys.append(p1[1]); ys.append(p2[1])
-    for lb in labels:
-        xs.append(lb.pos[0] - lb.hw); xs.append(lb.pos[0] + lb.hw)
-        ys.append(lb.pos[1] - lb.hh); ys.append(lb.pos[1] + lb.hh)
-    if not xs:
-        return [], None
-    bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
-
-    gx0 = bx0 - 2 * (block_w + margin)
-    gy0 = by0 - 2 * (block_h + margin)
-    gx1 = bx1 + 2 * (block_w + margin)
-    gy1 = by1 + 2 * (block_h + margin)
-
-    min_cell = max(2.0, min(block_w, block_h) / 20.0)
-    max_dim = max(gx1 - gx0, gy1 - gy0, 1.0)
-    cell = max(min_cell, max_dim / NOTES_MAX_CELLS)
-
-    nx = int((gx1 - gx0) / cell) + 1
-    ny = int((gy1 - gy0) / cell) + 1
-    grid = bytearray(nx * ny)
-
-    def mark(x0, y0, x1, y1):
-        ix0 = max(0, int((x0 - gx0) / cell))
-        iy0 = max(0, int((y0 - gy0) / cell))
-        ix1 = min(nx - 1, int((x1 - gx0) / cell))
-        iy1 = min(ny - 1, int((y1 - gy0) / cell))
-        for iy in range(iy0, iy1 + 1):
-            base = iy * nx
-            for ix in range(ix0, ix1 + 1):
-                grid[base + ix] = 1
-
-    r = NOTES_LINE_MARGIN
-    for (p1, p2) in obstacles:
-        mark(min(p1[0], p2[0]) - r, min(p1[1], p2[1]) - r,
-             max(p1[0], p2[0]) + r, max(p1[1], p2[1]) + r)
-    for lb in labels:
-        mark(lb.pos[0] - lb.hw, lb.pos[1] - lb.hh,
-             lb.pos[0] + lb.hw, lb.pos[1] + lb.hh)
-
-    stride = nx + 1
-    integral = [0] * (stride * (ny + 1))
-    for iy in range(ny):
-        base = iy * nx
-        ibase = (iy + 1) * stride
-        pbase = iy * stride
-        s = 0
-        for ix in range(nx):
-            if grid[base + ix]:
-                s += 1
-            integral[ibase + ix + 1] = integral[pbase + ix + 1] + s
-
-    def rect_sum(ix0, iy0, ix1, iy1):
-        return (integral[iy1 * stride + ix1]
-                - integral[iy0 * stride + ix1]
-                - integral[iy1 * stride + ix0]
-                + integral[iy0 * stride + ix0])
-
-    bw_cells = int(block_w / cell) + 1
-    bh_cells = int(block_h / cell) + 1
-    bcx = (bx0 + bx1) / 2.0
-    bcy = (by0 + by1) / 2.0
-    bhw = max(1.0, (bx1 - bx0) / 2.0)
-    bhh = max(1.0, (by1 - by0) / 2.0)
-
-    best_inside = None
-    best_outside = None
-    for iy in range(0, ny - bh_cells + 1):
-        for ix in range(0, nx - bw_cells + 1):
-            if rect_sum(ix, iy, ix + bw_cells, iy + bh_cells) > 0:
-                continue
-            cx = gx0 + (ix + bw_cells / 2.0) * cell
-            cy = gy0 + (iy + bh_cells / 2.0) * cell
-            x0 = cx - block_w / 2.0; x1 = cx + block_w / 2.0
-            y0 = cy - block_h / 2.0; y1 = cy + block_h / 2.0
-            dx_out = max(0.0, bx0 - x0) + max(0.0, x1 - bx1)
-            dy_out = max(0.0, by0 - y0) + max(0.0, y1 - by1)
-            expansion = dx_out + dy_out
-            nx_off = (cx - bcx) / bhw
-            ny_off = (cy - bcy) / bhh
-            corner = (nx_off * nx_off + ny_off * ny_off) ** 0.5
-            if expansion == 0:
-                if best_inside is None or corner > best_inside[0]:
-                    best_inside = (corner, cx, cy)
-            else:
-                key = (expansion, corner)
-                if best_outside is None or key < (best_outside[0], best_outside[1]):
-                    best_outside = (expansion, corner, cx, cy)
-
-    if best_inside is not None:
-        _, cx, cy = best_inside
-        vert = "top" if cy > bcy else "bottom"
-        horiz = "right" if cx > bcx else "left"
-        name = f"inside {vert}-{horiz}"
-    elif best_outside is not None:
-        _, _, cx, cy = best_outside
-        vert = "top" if cy > bcy else "bottom"
-        horiz = "right" if cx > bcx else "left"
-        name = f"outside {vert}-{horiz}"
-    else:
-        cx = bx1 + margin + block_w / 2.0
-        cy = by0 - margin - block_h / 2.0
-        name = "fallback (no free pocket)"
-
-    labels_out = []
-    top_y = cy + block_h / 2.0
-    for i, line in enumerate(lines):
-        ly = top_y - line_h * (i + 0.5)
-        lw = CHAR_ASPECT * font_size * len(line)
-        lx = (cx - block_w / 2.0) + lw / 2.0
-        labels_out.append(Label(line, (lx, ly), None, font_size))
-    return labels_out, name
-
-
-# ============================================================================
-# FEATURES / HOST-FINDING
-# ============================================================================
-
-def collect_features():
-    feats = []
-    n = len(INNER_PTS)
-    for i in range(n):
-        p1 = INNER_PTS[i]
-        p2 = INNER_PTS[(i + 1) % n]
-        tag = MAIN_TAGS[i] if i < len(MAIN_TAGS) else None
-        name = tag if tag else f"wall[{i + 1}]"
-        feats.append((name, p1, p2))
-    for c in COLUMNS:
-        x0, y0, x1, y1 = c["_box"]
-        feats.append((f"{c['tag']}.W", (x0, y0), (x0, y1)))
-        feats.append((f"{c['tag']}.E", (x1, y0), (x1, y1)))
-        feats.append((f"{c['tag']}.S", (x0, y0), (x1, y0)))
-        feats.append((f"{c['tag']}.N", (x0, y1), (x1, y1)))
-    for sr in SMALL_ROOMS:
-        poly = sr["_pts"]
-        tags = sr["_wall_tags"]
-        for i in range(len(poly)):
-            p1 = poly[i]
-            p2 = poly[(i + 1) % len(poly)]
-            tag = tags[i] if i < len(tags) else None
-            name = tag if tag else f"{sr['tag']}_edge[{i + 1}]"
-            feats.append((name, p1, p2))
-    return feats
-
-
 def find_host(edge, features,
               parallel_tol=HOST_PARALLEL_TOL,
               collinear_tol=HOST_COLLINEAR_TOL,
@@ -1588,62 +1208,20 @@ def find_host(edge, features,
     return best_name
 
 
-def clip_seg_against_boxes(seg, boxes):
-    segs = [seg]
-    for (bx0, by0, bx1, by1) in boxes:
-        new_segs = []
-        for s in segs:
-            x1, y1 = s[0]
-            x2, y2 = s[1]
-            if abs(y2 - y1) < 1e-6:
-                y = y1
-                if by0 <= y <= by1:
-                    xmin, xmax = min(x1, x2), max(x1, x2)
-                    if xmax < bx0 or xmin > bx1:
-                        new_segs.append(s)
-                    else:
-                        if xmin < bx0:
-                            new_segs.append(((xmin, y), (bx0, y)))
-                        if xmax > bx1:
-                            new_segs.append(((bx1, y), (xmax, y)))
-                else:
-                    new_segs.append(s)
-            elif abs(x2 - x1) < 1e-6:
-                x = x1
-                if bx0 <= x <= bx1:
-                    ymin, ymax = min(y1, y2), max(y1, y2)
-                    if ymax < by0 or ymin > by1:
-                        new_segs.append(s)
-                    else:
-                        if ymin < by0:
-                            new_segs.append(((x, ymin), (x, by0)))
-                        if ymax > by1:
-                            new_segs.append(((x, by1), (x, ymax)))
-                else:
-                    new_segs.append(s)
-            else:
-                new_segs.append(s)
-        segs = new_segs
-    return segs
-
-
-def merged_step_regions(steps):
-    if not steps:
-        return None
-    result = None
-    for s in steps:
-        face = make_face(Polyline(*s["_outline"], close=True))
-        result = face if result is None else result + face
-    return result
-
-
-def sketch_boundary_segments(sketch):
-    segs = []
-    for e in sketch.edges():
-        a = e.position_at(0)
-        b = e.position_at(1)
-        segs.append(((a.X, a.Y), (b.X, b.Y)))
-    return segs
+def make_wall_opening(p1, p2, poly, offset_along, width, z0, height,
+                      wall_t, pad=30.0):
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    L = hypot(dx, dy)
+    ux, uy = dx / L, dy / L
+    ix, iy = inward_normal(p1, p2, poly, wall_t)
+    ox, oy = -ix, -iy
+    cx = p1[0] + ux * (offset_along + width / 2) + ox * (wall_t / 2)
+    cy = p1[1] + uy * (offset_along + width / 2) + oy * (wall_t / 2)
+    cz = z0 + height / 2
+    angle = degrees(atan2(dy, dx))
+    box = Box(width, wall_t + 2 * pad, height)
+    box = box.rotate(Axis.Z, angle)
+    return Pos(cx, cy, cz) * box
 
 
 # ============================================================================
@@ -1735,10 +1313,12 @@ for d in OPENINGS:
                               d["_off_mm"], d["_w_mm"],
                               d["_sill_mm"], d["_h_mm"], WALL_T_MM)
 
-# Now that the room solid exists, emit the sidecar.  The sidecar's
-# planFaces field needs the solid's section at cut height, so this call
-# has to happen after the build above.
+# Emit the two sidecars.  room_walls.json needs the built solid (its
+# planFaces field comes from a section of it); room_dimensions.json
+# does not, but is written here so both files appear together.
 _dump_wall_json(room)
+_dump_dimensions_json()
+
 
 # ============================================================================
 # EXPORT 3D
@@ -1747,213 +1327,12 @@ _dump_wall_json(room)
 export_step(room, "room.step")
 export_stl(room, "room.stl")
 
-# ============================================================================
-# 2D FLOOR PLAN
-# ============================================================================
-
-plan = section(room, Plane.XY.offset(CUT_Z_MM))
-plan = plan.moved(Location((0, 0, -CUT_Z_MM)))
-
-n = len(INNER_PTS)
-features = collect_features()
-column_boxes = [c["_box"] for c in COLUMNS]
-
-dim_lines, dim_midpoints = [], {}
-sr_dim_lines, sr_dim_midpoints = [], {}
-col_dim_lines = []
-obstacles = []
-
-for i in range(n):
-    entry = WALL_DIMS_RESOLVED[i]
-    if entry is None:
-        continue
-    value, extend_to = entry
-    p1 = INNER_PTS[i]
-    p2 = INNER_PTS[(i + 1) % n]
-    if extend_to is not None:
-        dx = p2[0] - p1[0]; dy = p2[1] - p1[1]
-        if abs(dy) > abs(dx):
-            p2 = (p2[0], extend_to)
-        else:
-            p2 = (extend_to, p2[1])
-    lines, segs, mid = dimension(p1, p2, INNER_PTS, DIM_GAP * MM)
-    dim_lines += lines
-    obstacles += segs
-    dim_midpoints[MAIN_TAGS[i]] = mid
-
-for i in range(n):
-    obstacles.append((INNER_PTS[i], INNER_PTS[(i + 1) % n]))
-
-for sr in SMALL_ROOMS:
-    pts = sr["_pts"]
-    tags = sr["_wall_tags"]
-    dims = sr["dims"]
-    for i in range(len(pts)):
-        dim_value = dims[i] if i < len(dims) else None
-        if dim_value is None:
-            continue
-        p1 = pts[i]
-        p2 = pts[(i + 1) % len(pts)]
-        lines, segs, mid = dimension(p1, p2, pts, SR_DIM_GAP * MM)
-        sr_dim_lines += lines
-        obstacles += segs
-        tag = tags[i]
-        if tag:
-            sr_dim_midpoints[tag] = mid
-    for i in range(len(pts)):
-        obstacles.append((pts[i], pts[(i + 1) % len(pts)]))
-
-step_regions = merged_step_regions(STEPS)
-
-column_boxes_clip = [
-    (x0 + COLUMN_CLIP_EPS, y0 + COLUMN_CLIP_EPS,
-     x1 - COLUMN_CLIP_EPS, y1 - COLUMN_CLIP_EPS)
-    for (x0, y0, x1, y1) in column_boxes
-]
-
-step_lines = []
-step_region_centroids = []
-if step_regions is not None:
-    for seg in sketch_boundary_segments(step_regions):
-        for clipped in clip_seg_against_boxes(seg, column_boxes_clip):
-            step_lines.append(Line(*clipped))
-        obstacles.append(seg)
-    for f in step_regions.faces():
-        c = f.center()
-        step_region_centroids.append((c.X, c.Y))
-
-col_outline_lines = []
-for c in COLUMNS:
-    x0, y0, x1, y1 = c["_box"]
-    for edge in [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),
-                 ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]:
-        col_outline_lines.append(Line(*edge))
-        obstacles.append(edge)
-
-all_labels = []
-for i in range(n):
-    wall_tag = MAIN_TAGS[i]
-    if wall_tag is None or WALL_DIMS_RESOLVED[i] is None:
-        continue
-    p1 = INNER_PTS[i]
-    p2 = INNER_PTS[(i + 1) % n]
-    mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-    tag_name = f"{TAG_PREFIX}{wall_tag[1:]}"
-    if tag_name in TAG_OVERRIDES:
-        preferred = TAG_OVERRIDES[tag_name]
-    else:
-        ix, iy = inward_normal(p1, p2, INNER_PTS, TAG_INSET * MM)
-        preferred = (mx + ix * TAG_INSET * MM,
-                     my + iy * TAG_INSET * MM)
-    text = f"{tag_name} = {WALL_DIMS_RESOLVED[i][0]:g}"
-    target = dim_midpoints.get(wall_tag, (mx, my))
-    all_labels.append(Label(text, preferred, target, LABEL_SIZE * MM))
-
-for sr in SMALL_ROOMS:
-    pts = sr["_pts"]
-    tags = sr["_wall_tags"]
-    dims = sr["dims"]
-    for i, tag in enumerate(tags):
-        if not tag:
-            continue
-        p1 = pts[i]; p2 = pts[(i + 1) % len(pts)]
-        ix, iy = inward_normal(p1, p2, pts, SR_TAG_INSET * MM)
-        mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-        preferred = (mx + ix * SR_TAG_INSET * MM,
-                     my + iy * SR_TAG_INSET * MM)
-        text = f"{tag} = {dims[i]}"
-        target = sr_dim_midpoints.get(tag, (mx, my))
-        all_labels.append(Label(text, preferred, target, SR_LABEL_SIZE * MM))
-
-for d in OPENINGS:
-    p1, p2 = d["_p1"], d["_p2"]
-    L = hypot(p2[0] - p1[0], p2[1] - p1[1])
-    ux, uy = (p2[0] - p1[0]) / L, (p2[1] - p1[1]) / L
-    t_mid = d["_off_mm"] + d["_w_mm"] / 2
-    wall_p1 = d["_wall_p1"]
-    wx = wall_p1[0] + (p2[0] - wall_p1[0]) * t_mid / L
-    wy = wall_p1[1] + (p2[1] - wall_p1[1]) * t_mid / L
-    ix, iy = inward_normal(d["_wall_p1"], d["_wall_p2"], INNER_PTS,
-                           DOOR_LABEL_INSET * MM)
-    if d["tag"] in TAG_OVERRIDES:
-        preferred = TAG_OVERRIDES[d["tag"]]
-    else:
-        preferred = (wx + ix * DOOR_LABEL_INSET * MM,
-                     wy + iy * DOOR_LABEL_INSET * MM)
-    all_labels.append(Label(d["tag"], preferred, (wx, wy), LABEL_SIZE * MM))
-
-for c in COLUMNS:
-    x0, y0, x1, y1 = c["_box"]
-    all_labels.append(Label(c["tag"], ((x0 + x1) / 2, (y0 + y1) / 2), None,
-                            COLUMN_LABEL_SIZE * MM))
-
-for c in COLUMNS:
-    x0, y0, x1, y1 = c["_box"]
-    lines, segs, dim_mid = simple_dimension(
-        (x0, y0), (x1, y0), (0, -1), COL_DIM_GAP * MM)
-    col_dim_lines += lines
-    obstacles += segs
-    all_labels.append(dim_label(f"{(x1 - x0) / MM:g}", dim_mid,
-                                DIM_SIZE * MM, (0, -1), ARROW_SIZE * MM))
-    lines, segs, dim_mid = simple_dimension(
-        (x1, y0), (x1, y1), (1, 0), COL_DIM_GAP * MM)
-    col_dim_lines += lines
-    obstacles += segs
-    all_labels.append(dim_label(f"{(y1 - y0) / MM:g}", dim_mid,
-                                DIM_SIZE * MM, (1, 0), ARROW_SIZE * MM))
-
-for (cx, cy) in step_region_centroids:
-    all_labels.append(Label("STEP", (cx, cy), None, STEP_LABEL_SIZE * MM))
-
-relax_labels(all_labels, obstacles)
-
-notes_lines = build_notes_lines()
-notes_labels, notes_placement = place_notes_block(
-    notes_lines, NOTES_LABEL_SIZE * MM, obstacles, all_labels)
-
-merged_text = []
-merged_arrows = []
-for lb in all_labels:
-    merged_text.append(label(lb.text, lb.pos[0], lb.pos[1], lb.size))
-    if lb.target is not None:
-        merged_arrows += leader_from_box(lb.pos, lb.hw, lb.hh, lb.target,
-                                         ARROW_SIZE * MM)
-for lb in notes_labels:
-    merged_text.append(label(lb.text, lb.pos[0], lb.pos[1], lb.size))
-
-svg = ExportSVG(scale=0.1, margin=20, line_weight=0.5)
-svg.add_layer("plan",  line_color=WALL_COLOR, line_weight=0.7)
-svg.add_layer("dim",   line_color=LINE_COLOR, line_weight=0.3)
-svg.add_layer("col",   line_color=LINE_COLOR, line_weight=0.6)
-svg.add_layer("small", line_color=LINE_COLOR, line_weight=0.5)
-svg.add_layer("step",  line_color=WALL_COLOR, line_weight=0.5)
-svg.add_layer("text",  line_color=TEXT_COLOR, fill_color=TEXT_COLOR,
-              line_weight=0.3)
-
-svg.add_shape(plan, layer="plan")
-for s in col_outline_lines: svg.add_shape(s, layer="plan")
-for s in dim_lines:         svg.add_shape(s, layer="dim")
-for s in col_dim_lines:     svg.add_shape(s, layer="col")
-for s in sr_dim_lines:      svg.add_shape(s, layer="small")
-for s in step_lines:        svg.add_shape(s, layer="step")
-for s in merged_text:       svg.add_shape(s, layer="text")
-for s in merged_arrows:     svg.add_shape(s, layer="text")
-svg.write("floor_plan.svg")
-
-png_ok = True
-try:
-    with _quiet():
-        import cairosvg
-        cairosvg.svg2png(url="floor_plan.svg",
-                         write_to="floor_plan.png",
-                         background_color=PNG_BG,
-                         scale=PNG_SCALE)
-except ImportError:
-    png_ok = False
 
 # ============================================================================
 # REPORT
 # ============================================================================
+
+n = len(INNER_PTS)
 
 bb = room.bounding_box()
 area_mm2 = abs(sum(
@@ -1968,10 +1347,7 @@ for sr in SMALL_ROOMS:
     sr_tagged += [t for t in sr["_wall_tags"] if t]
 print(f"Walls (main)   : {len(main_tagged)}  ({', '.join(main_tagged)})")
 print(f"Walls (SR)     : {', '.join(sr_tagged)}")
-print(f"Steps          : {len(STEPS)} primitives  "
-      f"→ {len(step_region_centroids)} merged region(s)")
-print(f"Labels total   : {len(all_labels)} + {len(notes_labels)} notes lines")
-print(f"Notes placement: {notes_placement}")
+print(f"Steps          : {len(STEPS)} primitives")
 print(f"Wall height    : {WALL_HEIGHT:g} units ({WALL_H_MM:.0f} mm)")
 print(f"Wall thickness : {WALL_THICK:.0f} units ({WALL_T_MM:.0f} mm)")
 for c in COLUMNS:
@@ -1985,7 +1361,5 @@ for d in OPENINGS:
           f"sill {d.get('sill', 0)}")
 print(f"Interior area  : {area_mm2 / 1e6:.2f} m² (main room only)")
 print(f"Overall bbox   : {bb.size.X:.0f} × {bb.size.Y:.0f} × {bb.size.Z:.0f} mm")
-print("Wrote room.step, room.stl, room_walls.json, floor_plan.svg"
-      + (", floor_plan.png" if png_ok else ""))
-if not png_ok:
-    print("  (skipped PNG — install cairosvg: pip install cairosvg)")
+print("Wrote room.step, room.stl, room_walls.json, room_dimensions.json")
+print("  (run floor_plan.py to render the 2D plan)")
