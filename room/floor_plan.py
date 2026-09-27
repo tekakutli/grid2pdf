@@ -50,7 +50,7 @@ LAYOUT_META_FILE  = "floor_plan_layout.json"
 # overlap area and the indices of every label still overlapping.
 # Useful for diagnosing tight or crowded placements without having
 # to eyeball the SVG.
-DUMP_LAYOUT_META = True
+DUMP_LAYOUT_META = False
 
 
 def main():

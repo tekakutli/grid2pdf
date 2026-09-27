@@ -70,9 +70,7 @@ Two consequences:
       edge on top of it produces a doubled line.  The column outline
       is emitted as the column edge MINUS the attached-wall
       intervals, using the same axis-line + interval subtraction the
-      step-edge classifier uses.  A column fully embedded on one
-      side loses that entire edge; a column that only partially
-      abuts a wall keeps the piece that juts out past the wall.
+      step-edge classifier uses.
 
   2.  Attached walls (and the column's own edges, full and leftover)
       are added to the column dim label's `ignored_obstacles` set.
@@ -116,6 +114,43 @@ A label carries two pairs of half-extents:
                        × font size — the collision box is roughly
                        twice as tall.
 
+Leader tip clearance — pushing the label off its own arrowhead
+-------------------------------------------------------------
+A leader runs from a label's visual edge (tail) to its anchor (tip).
+For an arrow-tip label, an arrowhead of size `arrow_size` sits at the
+tip, extending back along the tip→tail direction.  If the label's
+center is closer to the tip than (visual tail distance + arrow_size
++ gap), the arrowhead overlaps the label text.
+
+The layout detects this in `_leader_tip_violation`: for every arrow-
+tip label whose leader segment exists, it computes how far short of
+the desired clearance the current label position is.  That shortfall,
+squared and weighted by `_LEADER_CLEAR_W`, is added to the label's
+overlap score.  Because every relaxation pass (discrete push, pair
+moves, gentle retract) minimises the overlap score, the label is
+pushed outward along the label→tip direction automatically — no
+separate pass, no extra bookkeeping, and the same non-overlap
+discipline that governs every other label interaction applies.
+
+Tuning:
+    _LEADER_TIP_GAP     extra air, in source units, beyond the
+                        arrowhead's back end.
+    _LEADER_CLEAR_W     weight of the squared-shortfall penalty.
+
+Leader routing — anchor proximity
+---------------------------------
+The router penalises four things when picking where a leader's dot
+or arrowhead lands:
+
+    crossings           a candidate segment that crosses a prior
+                        leader.
+    anchor→prior-seg    the candidate ANCHOR landing within
+                        _ANCHOR_SEP of a prior leader's line.
+    prior-anchor→seg    a prior leader's anchor landing within
+                        _ENDPOINT_SEP of the candidate segment.
+    label-box hit       the candidate segment crossing a prior
+                        label's collision box.
+
 Label targets
 -------------
 A label's `target` is a point, a polygon, or None.  Dimension tags
@@ -128,12 +163,22 @@ Relaxation and routing
 ----------------------
 Force relaxation, then a loop that pushes labels off leaders and
 re-routes, then a verify-and-retry round.
+
+Translation
+-----------
+The two user-visible strings this module writes — the notes-block
+heading and the notes-placement summary — come from T() in
+floor_plan_i18n.py.  The note ROW labels come from the room sidecar
+in English, so they route through T_note() which maps source label
+to translation key with graceful degradation (an unmapped source
+label renders unchanged).
 """
 
 import math
 from collections import defaultdict
 
 from floor_plan_i18n import T, T_note
+
 
 # ============================================================================
 # Presentation tunables
@@ -144,8 +189,9 @@ LABEL_HEIGHT_FACT = 0.75
 
 # Fraction of the font size that a typical sans-serif's ascender-to-
 # baseline span occupies, i.e. the VISUAL half-height of a label whose
-# text has no descenders (all of ours).  Used only for the leader's
-# tail placement — the collision box keeps using LABEL_HEIGHT_FACT.
+# text has no descenders (all of ours).  Used for the leader's tail
+# placement and the leader-tip clearance check — the collision box
+# keeps using LABEL_HEIGHT_FACT.
 VISUAL_TEXT_HH_FACT = 0.35
 
 LAYOUT_ITERATIONS = 300
@@ -217,6 +263,17 @@ RULER_SHAPE_TIEBREAK = 0.05
 # flip, large enough that a tie goes to the natural side.
 RULER_SIDE_FLIP_PENALTY = 1.0
 
+# ---- leader-tip clearance ----------------------------------------
+#
+# Extra air beyond the arrowhead's back end, in source units.  The
+# desired distance from a label's center to its own leader's tip is
+# (visual tail distance along the tip→label direction)
+# + arrow_size + _LEADER_TIP_GAP.  A shortfall of m costs m² ×
+# _LEADER_CLEAR_W in the overlap score, which every relaxation pass
+# already minimises.
+_LEADER_TIP_GAP = 40.0
+_LEADER_CLEAR_W = 40.0
+
 # Tolerance, in source units, at which a step edge and a wall face
 # count as "collinear".  Used by the step-edge classifier.
 STEP_WALL_TOL = 1.0
@@ -260,14 +317,6 @@ _CENTER_W      = 1.0
 _LENGTH_W      = 0.05
 
 # ---- anchor-to-prior-leader-segment proximity ----
-#
-# A candidate leader's anchor is the point where its dot or arrowhead
-# is drawn.  Having that anchor land on top of a PRIOR leader's line
-# reads as a visual overlap, so the router penalises anchors that come
-# within _ANCHOR_SEP of any already-placed segment.  Distinct from
-# _endpoint_proximity, which is the reverse query (prior anchors vs.
-# the candidate segment).  The quadratic form makes the penalty
-# vanish smoothly at _ANCHOR_SEP and stay dominant at zero distance.
 _ANCHOR_SEP    = 30.0
 _ANCHOR_W      = 100.0
 
@@ -335,21 +384,12 @@ def inward_normal_via_holes(p1, p2, holes, probe):
 
 
 # ============================================================================
-# Axis-aligned segment helpers — used by the step-edge classifier and
-# the column edge-erasure rule
+# Axis-aligned segment helpers
 # ============================================================================
 
 def _seg_axis_info(p1, p2, tol=0.5):
     """Return ((kind, coord), lo, hi) for an axis-aligned segment, or
-    (None, 0, 0) for a diagonal.
-
-        "H"   a horizontal segment: coord is its y.
-        "V"   a vertical   segment: coord is its x.
-
-    lo and hi are the min and max of the other coordinate, so the
-    interval [lo, hi] gives the segment's extent along its own axis.
-    Two segments with the same (kind, coord) lie on the same infinite
-    line, and their intervals are directly comparable."""
+    (None, 0, 0) for a diagonal."""
     dx = abs(p2[0] - p1[0])
     dy = abs(p2[1] - p1[1])
     if dy < tol and dx > tol:
@@ -362,8 +402,7 @@ def _seg_axis_info(p1, p2, tol=0.5):
 
 
 def _points_from_axis(line_key, lo, hi):
-    """Inverse of _seg_axis_info: reconstruct the endpoints of an
-    axis-aligned segment from its line identity and interval."""
+    """Inverse of _seg_axis_info."""
     kind, coord = line_key
     if kind == "H":
         return (lo, coord), (hi, coord)
@@ -371,10 +410,8 @@ def _points_from_axis(line_key, lo, hi):
 
 
 def _subtract_intervals(lo, hi, subtractions, tol=0.5):
-    """Return the pieces of [lo, hi] that lie outside every interval
-    in `subtractions`.  Intervals may be unsorted and may overlap;
-    they are sorted and merged on the fly.  Empty or degenerate
-    pieces (< tol long) are dropped."""
+    """Return the pieces of [lo, hi] outside every interval in
+    `subtractions`, sorted and merged."""
     if hi - lo < tol:
         return []
     out = []
@@ -406,9 +443,7 @@ class Label:
     `ignored_obstacles` is an optional set of (p1, p2) segment tuples
     (in either orientation) that both the pre-relaxation scorer and
     the relaxation itself will treat as if they did not exist for
-    this label.  Used for a column's attached walls and its own
-    edges: the value is allowed to sit on top of the wall the column
-    is flush against."""
+    this label."""
 
     def __init__(self, text, preferred, target, size, tip="arrow"):
         self.text      = text
@@ -433,14 +468,9 @@ def _dim_label(text, target, size, direction, arrow_size):
 
 
 def _step_label_position(poly, hw, hh, margin, obstacles):
-    """Preferred position for a STEP label.
-
-    The label's polygon target is where its dot attaches — not where
-    the label sits.  A centroid-preferred position pins the label in
-    the middle of the step, on top of every ruler line that crosses
-    the step's interior.  Instead, try positions outside the polygon
-    (above, below, left, right) at three distances each and return
-    the least-crowded candidate."""
+    """Preferred position for a STEP label: least crowded position
+    outside the polygon at three distances in each of four
+    directions."""
     xs = [p[0] for p in poly]
     ys = [p[1] for p in poly]
     x0, x1 = min(xs), max(xs)
@@ -451,10 +481,10 @@ def _step_label_position(poly, hw, hh, margin, obstacles):
     gaps = [margin * 0.3, margin, margin * 1.7]
     candidates = []
     for g in gaps:
-        candidates.append((cx, y1 + g + hh))   # above
-        candidates.append((cx, y0 - g - hh))   # below
-        candidates.append((x1 + g + hw, cy))   # right
-        candidates.append((x0 - g - hw, cy))   # left
+        candidates.append((cx, y1 + g + hh))
+        candidates.append((cx, y0 - g - hh))
+        candidates.append((x1 + g + hw, cy))
+        candidates.append((x0 - g - hw, cy))
 
     class _Tmp:
         pass
@@ -480,19 +510,6 @@ def _step_label_position(poly, hw, hh, margin, obstacles):
 # ============================================================================
 
 class _Ruler:
-    """A dimension bracket.  `shape` is "trapezoid" or "parallelogram".
-    `effective_tilt` is the tilt actually used by the trapezoid — the
-    nominal `tilt` scaled down for short walls.  `short_wall` marks
-    rulers whose effective tilt is less than the nominal.
-    `parallelogram_preferred` marks rulers short enough that the
-    parallelogram shape is the natural choice.
-
-    `inward` is the normal used to offset the dim line, and it is
-    REASSIGNED during the candidate search in _resolve_ruler_gaps: the
-    resolver tries both the natural side and its negation and picks
-    whichever is less crowded.  `side_flipped` records whether the
-    final choice was the flipped side, for reporting."""
-
     __slots__ = ("tag", "kind", "p1", "p2", "inward",
                  "base_gap", "gap", "tilt", "effective_tilt", "value",
                  "length", "shared_p1", "shared_p2",
@@ -670,10 +687,6 @@ def _ruler_conflict_count(ruler, placed_rulers, fixed_obstacles,
 def _resolve_ruler_gaps(rulers, fixed_obstacles,
                         ext_gap, ext_over, tick_half,
                         ext_gap_shared, MM):
-    """For each ruler, choose (side, gap, shape, shift) that minimises
-    the conflict count.  Both sides of the wall are tried for every
-    ruler; the natural side carries a small tiebreak penalty so a tie
-    goes to it."""
     ordered = sorted(rulers, key=lambda r: -r.length)
     placed  = []
 
@@ -785,16 +798,7 @@ def _resolve_ruler_gaps(rulers, fixed_obstacles,
 
 def _leader_segment(label_pos, hw, hh, anchor_pt, pad=0.0):
     """Return (tail, tip) of the leader segment that runs from the
-    label's visual edge to its target.
-
-    The tail is the point where the ray from the label's centre to the
-    target exits the box (hw, hh).  `pad` is added to that exit
-    distance along the ray; the default of 0 puts the tail exactly on
-    the box edge, and callers pass hw/hh values that already
-    approximate the VISUAL text extents (see _route_leaders), so the
-    tail lands on the text with no gap.  Text is drawn on top of the
-    leader, so any incidental overlap in the tangential direction is
-    invisible."""
+    label's visual edge to its target."""
     tx, ty = label_pos
     wx, wy = anchor_pt
     dx = wx - tx
@@ -853,11 +857,8 @@ def _endpoint_proximity(seg, prior_endpoints):
             pen += short * short
     return pen
 
+
 def _anchor_segment_proximity(anchor, prior_segs, sep):
-    """Penalty for a candidate anchor landing near any already-placed
-    leader segment.  Quadratic: zero at distance >= sep, rising to
-    sep^2 at distance 0.  Used by the router so a label's dot / arrow
-    tip does not get placed on top of a prior leader's line."""
     pen = 0.0
     if not prior_segs:
         return pen
@@ -868,6 +869,7 @@ def _anchor_segment_proximity(anchor, prior_segs, sep):
             short = sep - d
             pen += short * short
     return pen
+
 
 def _label_box_penetration_length(seg, labels, exclude_idx, margin):
     if not labels:
@@ -917,15 +919,9 @@ def _route_leaders(labels):
             candidates = [tuple(lb.target)]
             center = tuple(lb.target)
 
-        # The leader's tail must land on the VISUAL edge of the
-        # text, not on the (larger) collision box.  A typical
-        # sans-serif has cap height ≈ 0.7 em and no descender in
-        # our labels, so the visible half-height is ≈ 0.35 × font
-        # size.  The collision box half-height is 0.75 × font size,
-        # i.e. roughly twice as tall; starting the leader at the
-        # box edge leaves a visible gap for any mostly-vertical
-        # leader.  The horizontal half-width already matches the
-        # visual text closely, so it is used unchanged.
+        # The leader's tail lands on the VISUAL edge of the text,
+        # not on the larger collision box, so the tail meets the
+        # glyphs with no gap.
         vis_hw = lb.hw
         vis_hh = lb.size * VISUAL_TEXT_HH_FACT
 
@@ -991,6 +987,48 @@ def _leaders_settled(a, b):
     return True
 
 
+def _leader_tip_violation(li, labels, leaders, arrow_size, gap):
+    """Return (mag, ux, uy) where (ux, uy) is the unit vector from the
+    leader's tip to the label's center, and `mag` is how far short of
+    the desired clearance the label currently is.  Zero when there
+    is no violation — the label has no leader, its tip is a dot (a
+    dot is anchored inside the shape it labels and is small), or the
+    clearance is already satisfied.
+
+    Desired distance: the label's visual tail distance along the
+    tip→label direction, PLUS the arrowhead's length, PLUS `gap`.
+    The visual tail distance is the ray-AABB boundary distance with
+    the visual half-extents (hw, size × VISUAL_TEXT_HH_FACT) — the
+    same formula `_leader_segment` uses to place the tail.  So the
+    arrowhead's back end (at `tip + arrow_size` along tip→tail)
+    clears the visual text edge by `gap`."""
+    lb = labels[li]
+    if lb.tip != "arrow" or not leaders:
+        return (0.0, 0.0, 0.0)
+    entry = leaders.get(li)
+    if entry is None:
+        return (0.0, 0.0, 0.0)
+    tip, seg = entry
+    if tip is None or seg is None:
+        return (0.0, 0.0, 0.0)
+    dx = lb.pos[0] - tip[0]
+    dy = lb.pos[1] - tip[1]
+    d = math.hypot(dx, dy)
+    if d < 1e-6:
+        return (0.0, 1.0, 1.0)
+    ux = dx / d
+    uy = dy / d
+    vis_hw = lb.hw
+    vis_hh = lb.size * VISUAL_TEXT_HH_FACT
+    t_x = vis_hw / abs(ux) if abs(ux) > 1e-9 else float("inf")
+    t_y = vis_hh / abs(uy) if abs(uy) > 1e-9 else float("inf")
+    d_tail = min(t_x, t_y)
+    need = d_tail + arrow_size + gap
+    if d >= need:
+        return (0.0, 0.0, 0.0)
+    return (need - d, ux, uy)
+
+
 # ============================================================================
 # Scoring primitives
 # ============================================================================
@@ -1039,13 +1077,15 @@ def _aabb_seg_penetration(a, p1, p2, margin):
     return math.hypot(dx * (t1 - t0), dy * (t1 - t0))
 
 
-def _label_overlap_score(li, labels, obstacles, margin, leaders=None):
+def _label_overlap_score(li, labels, obstacles, margin, leaders=None,
+                         arrow_size=80.0):
     """Total cost of a label's current position.
 
     Obstacles in the label's `ignored_obstacles` set (both orientations)
-    are skipped.  This is what lets a column's dim value sit on top of
-    the wall the column is attached to without the relaxation pushing
-    it off."""
+    are skipped.  A label whose own arrow tip sits too close to its own
+    center pays a squared-shortfall penalty, so every relaxation pass
+    pushes the label outward along the tip→label direction until the
+    arrowhead clears the text."""
     a = labels[li]
     score = 0.0
     ignore = getattr(a, "ignored_obstacles", None) or set()
@@ -1068,6 +1108,11 @@ def _label_overlap_score(li, labels, obstacles, margin, leaders=None):
             pen = _aabb_seg_penetration(a, seg[0], seg[1],
                                         LEADER_LABEL_MARGIN)
             score += pen * LEADER_PENETRATION_W
+
+        # Own-leader tip clearance.
+        mag, _ux, _uy = _leader_tip_violation(
+            li, labels, leaders, arrow_size, _LEADER_TIP_GAP)
+        score += (mag * mag) * _LEADER_CLEAR_W
 
     return score
 
@@ -1144,7 +1189,8 @@ def _force_relax(labels, obstacles, margin):
 # Relaxation — pass 2: discrete push
 # ============================================================================
 
-def _discrete_push(labels, obstacles, margin, leaders=None):
+def _discrete_push(labels, obstacles, margin, leaders=None,
+                   arrow_size=80.0):
     candidates = []
     for s in DISCRETE_STEPS:
         for dx, dy in _DISCRETE_DIRS:
@@ -1154,7 +1200,8 @@ def _discrete_push(labels, obstacles, margin, leaders=None):
         moved = False
         for li, a in enumerate(labels):
             before = _label_overlap_score(
-                li, labels, obstacles, margin, leaders=leaders)
+                li, labels, obstacles, margin, leaders=leaders,
+                arrow_size=arrow_size)
             if before <= 0.0:
                 continue
             ox, oy = a.pos[0], a.pos[1]
@@ -1164,7 +1211,8 @@ def _discrete_push(labels, obstacles, margin, leaders=None):
                 a.pos[0] = ox + dx
                 a.pos[1] = oy + dy
                 n = _label_overlap_score(
-                    li, labels, obstacles, margin, leaders=leaders)
+                    li, labels, obstacles, margin, leaders=leaders,
+                    arrow_size=arrow_size)
                 if n < best_n - DISCRETE_EPS:
                     best_n = n
                     best_x = a.pos[0]
@@ -1181,7 +1229,8 @@ def _discrete_push(labels, obstacles, margin, leaders=None):
 # Relaxation — pass 3: coordinated pair moves
 # ============================================================================
 
-def _coordinated_pair_moves(labels, obstacles, margin, leaders=None):
+def _coordinated_pair_moves(labels, obstacles, margin, leaders=None,
+                            arrow_size=80.0):
     for _ in range(PAIR_ROUNDS):
         pairs = []
         n = len(labels)
@@ -1202,9 +1251,11 @@ def _coordinated_pair_moves(labels, obstacles, margin, leaders=None):
 
             best_score = (
                 _label_overlap_score(i, labels, obstacles, margin,
-                                     leaders=leaders) +
+                                     leaders=leaders,
+                                     arrow_size=arrow_size) +
                 _label_overlap_score(j, labels, obstacles, margin,
-                                     leaders=leaders)
+                                     leaders=leaders,
+                                     arrow_size=arrow_size)
             )
             best = (ax0, ay0, bx0, by0)
 
@@ -1216,9 +1267,11 @@ def _coordinated_pair_moves(labels, obstacles, margin, leaders=None):
                     b.pos[1] = by0 - dy * s
                     score = (
                         _label_overlap_score(i, labels, obstacles, margin,
-                                             leaders=leaders) +
+                                             leaders=leaders,
+                                             arrow_size=arrow_size) +
                         _label_overlap_score(j, labels, obstacles, margin,
-                                             leaders=leaders)
+                                             leaders=leaders,
+                                             arrow_size=arrow_size)
                     )
                     if score < best_score - DISCRETE_EPS:
                         best_score = score
@@ -1237,7 +1290,8 @@ def _coordinated_pair_moves(labels, obstacles, margin, leaders=None):
 # Relaxation — pass 4: gentle retract
 # ============================================================================
 
-def _gentle_retract(labels, obstacles, margin, leaders=None):
+def _gentle_retract(labels, obstacles, margin, leaders=None,
+                    arrow_size=80.0):
     for _ in range(RETRACT_ITERATIONS):
         for li, a in enumerate(labels):
             px, py = a.preferred
@@ -1246,7 +1300,8 @@ def _gentle_retract(labels, obstacles, margin, leaders=None):
                 continue
 
             current_score = _label_overlap_score(
-                li, labels, obstacles, margin, leaders=leaders)
+                li, labels, obstacles, margin, leaders=leaders,
+                arrow_size=arrow_size)
 
             lo, hi = 0.0, 1.0
             for _ in range(RETRACT_BISECT):
@@ -1254,7 +1309,8 @@ def _gentle_retract(labels, obstacles, margin, leaders=None):
                 a.pos[0] = cx + (px - cx) * mid
                 a.pos[1] = cy + (py - cy) * mid
                 score = _label_overlap_score(
-                    li, labels, obstacles, margin, leaders=leaders)
+                    li, labels, obstacles, margin, leaders=leaders,
+                    arrow_size=arrow_size)
                 if score > current_score + 0.01:
                     hi = mid
                 else:
@@ -1268,7 +1324,7 @@ def _gentle_retract(labels, obstacles, margin, leaders=None):
 # Relaxation — orchestrator
 # ============================================================================
 
-def relax_labels(labels, obstacles):
+def relax_labels(labels, obstacles, arrow_size=80.0):
     if not labels:
         return {}
 
@@ -1280,11 +1336,11 @@ def relax_labels(labels, obstacles):
     leaders = _route_leaders(labels)
     for _ in range(LEADER_ITERATIONS):
         _discrete_push(labels, obstacles, LAYOUT_MARGIN,
-                       leaders=leaders)
+                       leaders=leaders, arrow_size=arrow_size)
         _coordinated_pair_moves(labels, obstacles, LAYOUT_MARGIN,
-                                leaders=leaders)
+                                leaders=leaders, arrow_size=arrow_size)
         _gentle_retract(labels, obstacles, LAYOUT_MARGIN,
-                        leaders=leaders)
+                        leaders=leaders, arrow_size=arrow_size)
 
         new_leaders = _route_leaders(labels)
         if _leaders_settled(leaders, new_leaders):
@@ -1296,9 +1352,9 @@ def relax_labels(labels, obstacles):
         if not _has_any_overlap(labels, LAYOUT_MARGIN):
             break
         _discrete_push(labels, obstacles, LAYOUT_MARGIN,
-                       leaders=leaders)
+                       leaders=leaders, arrow_size=arrow_size)
         _coordinated_pair_moves(labels, obstacles, LAYOUT_MARGIN,
-                                leaders=leaders)
+                                leaders=leaders, arrow_size=arrow_size)
 
     leaders = _route_leaders(labels)
     return leaders
@@ -1311,7 +1367,7 @@ def relax_labels(labels, obstacles):
 def build_notes_lines(notes_data):
     if not notes_data:
         return []
-    pairs = [(T_note(n["label"]), n["value"]) for n in notes_data]   # ← changed
+    pairs = [(T_note(n["label"]), n["value"]) for n in notes_data]
     key_w = max(len(k) for k, _ in pairs)
     body = [f"{k.ljust(key_w)}  {v}" for k, v in pairs]
     title = T("notesTitle")
@@ -1463,7 +1519,8 @@ def _serialize_target(t):
     return [round(t[0], 2), round(t[1], 2)]
 
 
-def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
+def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm,
+                        arrow_size=80.0):
     overlaps = []
     n = len(labels)
     for i in range(n):
@@ -1544,6 +1601,10 @@ def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
                     "visible": seg is not None,
                 }
 
+        # The leader-tip clearance shortfall for this label, if any.
+        tip_mag, _ux, _uy = _leader_tip_violation(
+            i, labels, leaders, arrow_size, _LEADER_TIP_GAP)
+
         label_info.append({
             "index":   i,
             "text":    lb.text,
@@ -1560,6 +1621,7 @@ def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
             "pair_overlap_area":      round(pair_overlap, 3),
             "obstacle_penetration":   round(pen, 3),
             "leader_penetration":     round(leader_pen, 3),
+            "leader_tip_clearance":   round(tip_mag, 3),
             "overlaps_with":          per_pair,
             "nearest_label":          nearest_idx,
             "nearest_distance":       round(nearest_d, 2),
@@ -1570,12 +1632,13 @@ def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
     total_pair = sum(o["area"] for o in overlaps)
     total_pen  = sum(li["obstacle_penetration"] for li in label_info)
     total_lpen = sum(li["leader_penetration"]  for li in label_info)
+    total_clea = sum(li["leader_tip_clearance"] for li in label_info)
     labels_with_overlap = sorted(set(
         [o["a"] for o in overlaps] + [o["b"] for o in overlaps]
     ))
 
     return {
-        "version": 14,
+        "version": 15,
         "unit_mm": unit_mm,
         "config": {
             "layout_margin":           margin,
@@ -1584,6 +1647,10 @@ def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
             "leader_label_margin":     LEADER_LABEL_MARGIN,
             "leader_iterations":       LEADER_ITERATIONS,
             "visual_text_hh_fact":     VISUAL_TEXT_HH_FACT,
+            "leader_tip_gap":          _LEADER_TIP_GAP,
+            "leader_clear_w":          _LEADER_CLEAR_W,
+            "anchor_sep":              _ANCHOR_SEP,
+            "anchor_w":                _ANCHOR_W,
             "ruler_tilt":              RULER_TILT_UNITS,
             "ruler_min_dim_line":      RULER_MIN_DIM_LINE_UNITS,
             "ruler_short_dim_line":    RULER_SHORT_DIM_LINE_UNITS,
@@ -1620,6 +1687,7 @@ def compute_layout_meta(labels, obstacles, leaders, margin, unit_mm):
             "total_pair_overlap":          round(total_pair, 3),
             "total_obstacle_penetration":  round(total_pen, 3),
             "total_leader_penetration":    round(total_lpen, 3),
+            "total_leader_tip_clearance":  round(total_clea, 3),
             "labels_with_overlap":         labels_with_overlap,
         },
         "labels":              label_info,
@@ -1718,8 +1786,6 @@ def _simple_dimension(p1, p2, offset_dir, gap,
 
 
 class _Box:
-    """Minimal stand-in for a Label when only .pos / .hw / .hh are
-    needed by _aabb_seg_penetration."""
     __slots__ = ("pos", "hw", "hh")
     def __init__(self, pos, hw, hh):
         self.pos = list(pos)
@@ -1731,32 +1797,6 @@ def _col_dim_candidate_penalty(segs, ticks, mid, direction,
                                label_hw, label_hh, arrow_size,
                                obstacles, own_edges_set, attached_walls,
                                threshold):
-    """Crowding score for one column-dim candidate.
-
-    Two terms:
-
-        segment grazing   sum over the dim line, extension lines, and
-                          ticks of (threshold - d) for every foreign
-                          obstacle segment closer than threshold.
-
-        label intrusion   COL_DIM_LABEL_PENALTY per foreign obstacle
-                          segment that intersects the label's preferred
-                          box.  Binary.
-
-    Exclusions:
-
-        grazing       an obstacle collinear with the segment being
-                      checked is a wall the segment is drawn along,
-                      not a crossing.
-
-        label         obstacles in `attached_walls` are excluded from
-                      the label-intrusion term so a narrow column's
-                      value can sit on top of the wall the column is
-                      attached to.  "Over the wall if you must."
-
-    The column's own edges (`own_edges_set`) are excluded from both
-    terms — the extension lines necessarily touch the column's
-    corners."""
     pen = 0.0
     for s in segs + ticks:
         for obs in obstacles:
@@ -1840,9 +1880,9 @@ def build_layout(geom):
                     wall_line_intervals[lk].append((lo, hi))
 
     # Snapshot the wall-only obstacles.  Column-edge erasure scans
-    # THIS list (not the growing fixed_obstacles) so that a column's
-    # edge is only erased against actual wall faces, and not against
-    # a previous column's leftover that happens to be collinear.
+    # THIS list (not the growing fixed_obstacles) so a column edge is
+    # only erased against actual wall faces, not against a previous
+    # column's leftover.
     wall_only_obstacles = list(fixed_obstacles)
 
     # ---- 2. steps --------------------------------------------------
@@ -1861,7 +1901,6 @@ def build_layout(geom):
         cy = sum(p[1] for p in outline) / len(outline)
         step_centroids.append((cx, cy))
 
-    # 2a. Gather all step edges with axis info and owning height.
     step_edges = []
     for si, st in enumerate(geom["steps"]):
         outline = [tuple(p) for p in st["outline"]]
@@ -1881,7 +1920,6 @@ def build_layout(geom):
                 "height": h,
             })
 
-    # 2b. Same-height neighbouring steps: record shared intervals.
     shared_intervals = defaultdict(list)
     n_e = len(step_edges)
     for i in range(n_e):
@@ -1909,7 +1947,6 @@ def build_layout(geom):
                 merged.append([lo, hi])
         shared_intervals[lk] = [tuple(m) for m in merged]
 
-    # 2c. Emit each step edge minus its line's merged intervals.
     for e in step_edges:
         pieces = _subtract_intervals(
             e["lo"], e["hi"],
@@ -1933,27 +1970,6 @@ def build_layout(geom):
             fixed_obstacles.append((p1, p2))
 
     # ---- 3. column dims and column outlines ------------------------
-    #
-    # Two things happen here per column:
-    #
-    #   3a. The column's outline is emitted as its four own edges
-    #       MINUS the intervals covered by a wall face.  A side that
-    #       is fully flush against a wall disappears — the wall's
-    #       boundary is already drawn there, so drawing the column
-    #       edge on top of it would be a doubled line.  A side that
-    #       only partially abuts a wall keeps the piece that juts
-    #       out.  Same axis-line + interval subtraction used by the
-    #       step-edge classifier.
-    #
-    #   3b. Attached walls (walls collinear with any column edge) are
-    #       collected for the dim label's `ignored_obstacles` set —
-    #       and, along with the column's own (full and leftover)
-    #       edges, they make up the set the crowding scorer and the
-    #       relaxation are allowed to ignore for that specific dim.
-    #
-    # The two dims (W and H) of a column share the same attached-wall
-    # set: a wall the column is flush against is attached regardless
-    # of which dim's label we're placing.
     col_dim_lines  = []
     col_dim_labels = []
     col_dim_ticks  = []
@@ -1963,20 +1979,16 @@ def build_layout(geom):
         x0, y0, x1, y1 = col["box"]
 
         own_edges = [
-            ((x0, y0), (x1, y0)),   # S
-            ((x1, y0), (x1, y1)),   # E
-            ((x1, y1), (x0, y1)),   # N
-            ((x0, y1), (x0, y0)),   # W
+            ((x0, y0), (x1, y0)),
+            ((x1, y0), (x1, y1)),
+            ((x1, y1), (x0, y1)),
+            ((x0, y1), (x0, y0)),
         ]
         own_set = set()
         for e in own_edges:
             own_set.add(e)
             own_set.add((e[1], e[0]))
 
-        # 3a-1. Attached walls: scan the WALL-ONLY obstacle
-        # snapshot.  Anything collinear with one of this column's
-        # own edges counts.  Used both for the edge erasure (below)
-        # and for the dim label's ignored_obstacles set.
         attached_walls = set()
         for obs in wall_only_obstacles:
             for e in own_edges:
@@ -1985,25 +1997,16 @@ def build_layout(geom):
                     attached_walls.add((obs[1], obs[0]))
                     break
 
-        # 3a-2. Emit each column edge minus the intervals covered
-        # by an attached wall.
         for e in own_edges:
             lk, lo, hi = _seg_axis_info(e[0], e[1])
             if lk is None:
-                # Diagonal column edge — cannot happen for an
-                # axis-aligned column, but the guard is cheap.
                 col_outline_lines.append(e)
                 fixed_obstacles.append(e)
                 own_set.add(e)
                 own_set.add((e[1], e[0]))
                 continue
 
-            # Collect the wall intervals that lie on this edge's
-            # line.  We could use `attached_walls` directly, but
-            # going through `wall_line_intervals` is cheaper and
-            # avoids re-deriving axis info per obstacle.
             subtractions = wall_line_intervals.get(lk, [])
-
             leftovers = _subtract_intervals(lo, hi, subtractions,
                                             tol=_ATTACH_COLLINEAR_TOL)
 
@@ -2013,15 +2016,9 @@ def build_layout(geom):
                 p1, p2 = _points_from_axis(lk, plo, phi)
                 col_outline_lines.append((p1, p2))
                 fixed_obstacles.append((p1, p2))
-                # Add leftovers to own_set so the dim scorer skips
-                # them for grazing (they're still the column's own
-                # boundary) and so they land in the label's
-                # ignored_obstacles set below.
                 own_set.add((p1, p2))
                 own_set.add((p2, p1))
 
-        # 3b. Column dim labels — side choice by crowding, same as
-        # before.
         w_text = f"{(x1 - x0) / MM:g}"
         w_hw = CHAR_ASPECT * LABEL_SIZE_DIM * len(w_text) / 2.0
         w_hh = LABEL_HEIGHT_FACT * LABEL_SIZE_DIM
@@ -2031,12 +2028,12 @@ def build_layout(geom):
         h_hh = LABEL_HEIGHT_FACT * LABEL_SIZE_DIM
 
         w_candidates = [
-            ((x0, y0), (x1, y0), (0, -1)),   # below, base = S
-            ((x0, y1), (x1, y1), (0, +1)),   # above, base = N
+            ((x0, y0), (x1, y0), (0, -1)),
+            ((x0, y1), (x1, y1), (0, +1)),
         ]
         h_candidates = [
-            ((x1, y0), (x1, y1), (1, 0)),    # right, base = E
-            ((x0, y0), (x0, y1), (-1, 0)),   # left,  base = W
+            ((x1, y0), (x1, y1), (1, 0)),
+            ((x0, y0), (x0, y1), (-1, 0)),
         ]
 
         def _pick(candidates, lhw, lhh):
@@ -2192,7 +2189,7 @@ def build_layout(geom):
         labels.append(lb)
 
     # ---- 6. relaxation + leader routing ----------------------------
-    leaders = relax_labels(labels, obstacles)
+    leaders = relax_labels(labels, obstacles, arrow_size=ARROW_SIZE)
 
     # ---- 7. notes block --------------------------------------------
     notes_lines = build_notes_lines(geom.get("notes", []))
@@ -2201,7 +2198,7 @@ def build_layout(geom):
 
     # ---- 8. meta ---------------------------------------------------
     meta = compute_layout_meta(labels, obstacles, leaders,
-                               LAYOUT_MARGIN, MM)
+                               LAYOUT_MARGIN, MM, arrow_size=ARROW_SIZE)
     meta["rulers"] = ruler_meta
 
     return {

@@ -1,4 +1,4 @@
-"""""
+"""
 floor_plan_draw.py — SVG string generation for the floor plan.
 
 Reads the layout dict from floor_plan_layout and renders it.  No
@@ -12,6 +12,40 @@ north, i.e. up on a printed plan.  SVG has +Y pointing down.  Every
 source point is mapped through `to_screen`, which flips Y and scales
 by PRINT_SCALE at once.  Nothing is emitted inside a group transform,
 which is what keeps text upright.
+
+Fonts
+-----
+The typeface is chosen the same way the cable and boxes playgrounds
+choose theirs: everything flows from playground_fonts.py.  This
+module imports two names from it —
+
+    FONT_FAMILY_SANS    the CSS font-family stack for the sans face
+    FONT_FACE_CSS       the @font-face declaration, base64-inlined
+
+— and does two things with them:
+
+    FONT_FAMILY         set to FONT_FAMILY_SANS, and used as the
+                        font-family attribute on every <text> the
+                        renderer emits.
+
+    @font-face block    embedded inside the SVG, in a <style> inside
+                        <defs>, so the SVG file is fully self-
+                        contained: opening it in a browser or
+                        embedding it anywhere shows the intended
+                        typeface without the reader needing the font
+                        installed.
+
+To change the typeface, edit playground_fonts.py — do not touch
+this file.  That is the same single-source-of-truth arrangement the
+two playgrounds use.
+
+One caveat about PNG: cairosvg does not parse @font-face.  The .svg
+renders correctly everywhere (browser, Inkscape, Word, etc.); the
+.png, which is produced by cairosvg, falls back to whatever the
+system has for the fallback stack.  If you need the .png to show the
+same exact face, install the font file system-wide and reference it
+by name — but that is a build-environment concern, not something
+this module can solve.
 
 Margins
 -------
@@ -30,64 +64,99 @@ so the drawing's bbox spans [MARGIN_MM, W - MARGIN_MM] ×
 [MARGIN_MM, H - MARGIN_MM] and nothing touches the SVG edges.
 
 The bbox itself is computed by _bbox_of, which collects every
-element the renderer will draw — plan faces, step edges (solid and
-dashed), column outlines, all four dimension-line arrays and the
-tick array, every label, and every leader segment.  Labels get an
-extra font-proportional pad (LABEL_BBOX_PAD_FRAC) because their
-collision-box half-extents are CHAR_ASPECT-based estimates, and a
-wide display face can render wider than the estimate.
+element the renderer will draw.  Labels get an extra font-
+proportional pad (LABEL_BBOX_PAD_FRAC) because their collision-box
+half-extents are CHAR_ASPECT-based estimates, and a wide display
+face can render wider than the estimate.
 
-Layer colours:
+Everything is ink
+-----------------
+There is one line colour: black.  Dimension lines used to be red;
+they are black now.  What distinguishes the four kinds of line is
+TEXTURE, not colour:
 
-    ink   structural — plan outline, step risers, column outlines,
-                       labels, leaders
-    red   dimension lines only — the "rulers"
+    walls, columns      solid black FILLS
+    step edges          solid (against a wall) or dashed (free
+                        riser against open floor)
+    leaders             solid thin black lines with arrowheads or
+                        dots at their anchor ends
+    dimension lines     STRIPED black lines — a series of short
+                        ticks rotated away from the line's own
+                        direction, evenly spaced along it.
+
+The stripe is the "rotated dashes" idea: instead of dashes running
+ALONG the line, each mark is a short segment crossing the line at
+an angle.  On a horizontal dimension line the marks read as a row
+of diagonal ticks; on a vertical one, as a column of them.  It is
+unmistakably not a leader and unmistakably not a wall outline.
+
+Tuning:
+    _STRIPE_PERIOD_MM   spacing between tick centres, along the line
+    _STRIPE_TICK_MM     length of each individual tick
+    _STRIPE_ANGLE_DEG   angle between the tick and the line's own
+                        direction; 90° would make them perpendicular,
+                        0° would make them parallel (a normal dashed
+                        line), 60° gives the striped look.
+    _W_DIM_STRIPE       the stripe tick stroke width — heavier than
+                        the leader stroke, so the ticks read as a
+                        texture rather than as hairlines.
+
+Walls and columns — solid black fills
+-------------------------------------
+The wall regions (plan face) and the column footprints are drawn as
+solid black fills.  A column that abuts a wall is visually
+indistinguishable from it.  The wall face's `fill-rule="evenodd"`
+cuts the room interior and the door openings out of the fill — a
+point inside a hole ring is not wall material and stays white.
+
+White inversion over the black fills
+------------------------------------
+Two line families — the leaders and the striped dimension lines —
+read as inverted where they cross or end over a black fill: white
+on black, so they stay legible instead of disappearing into the
+fill.
+
+Mechanism: draw the geometry twice.
+
+    1.  Pass 1: BLACK, unmasked, over paper — the normal
+        appearance.  Drawn first.
+
+    2.  Pass 2: WHITE, masked to the wall + column black fills.
+        Drawn second, on top of pass 1, so the white wins wherever
+        the mask is opaque.
+
+The mask carries WHITE wall paths and WHITE column paths and
+nothing else.  Its default background is transparent black — the
+"hidden" state under both luminance masking (RGB 0) and alpha
+masking (alpha 0).  So the mask is opaque exactly over a wall or a
+column, and transparent everywhere else.
+
+Why a <mask>, not a <clipPath>
+------------------------------
+SVG 1.1 restricts <clipPath> children to <path>, <text>, and <use>.
+cairosvg enforces that restriction and, worse, appears to consider
+only the FIRST <path> child of a <clipPath> — so a wall path works
+but additional column paths inside the same clip are silently
+dropped.  That was the bug that kept the C1 column dot from
+inverting.  A <mask> has no such restriction: both <path> and
+<rect> are valid children, and multiple children composite as
+expected.
+
+`fill-rule="evenodd"` on the wall paths inside the mask is what
+keeps the hole rings (room interior, door openings) out of the
+masked region.  A leader that passes through a doorway is over
+paper, not over wall, and stays black there.
 
 Line weights
 ------------
-The six _W_* constants are the printed widths, in millimetres.  Their
-relative sizes are what make a plan readable: the wall silhouette
-outranks the column and step outlines, which outrank the dimension
-lines, which outrank the leaders.
+The six _W_* constants are the printed widths, in millimetres.
 
-    _W_PLAN       1.2   outer wall silhouette — the strongest mark
+    _W_PLAN       1.2   wall silhouette
     _W_COL        1.1   column footprint outline
-    _W_DIM_SMALL  1.0   small-room rulers
     _W_STEP       0.9   step riser outline
-    _W_DIM_MAIN   0.6   main-wall rulers
-    _W_TEXT       0.6   leader lines and arrowhead chevrons
-
-Step edges — solid vs. dashed
------------------------------
-A step polygon edge is drawn as one of two things:
-
-    step_lines_solid   the edge is coincident with a wall face, so
-                       it reinforces the wall's own boundary.  Drawn
-                       solid, same weight as the other step edges.
-
-    step_lines_dashed  the edge is a free-standing riser against
-                       open floor.  Drawn dashed, so a reader can
-                       tell "this is a step" apart from "this is a
-                       wall boundary".
-
-Edges that lie interior to a merged surface (two same-height
-neighbouring steps) are not present in either list — the layout
-stage drops them.
-
-Label tips
-----------
-Each label carries a `tip` field:
-
-    "arrow"   the leader ends in a small open chevron — two short
-              solid segments.  Used for labels that point at a
-              specific coordinate: a dimension tag's mid, a door
-              label's jamb.
-
-    "dot"     the leader ends in a small filled circle.  Used for
-              labels that point at a shape: a column tag, a STEP
-              label.
-
-Every leader is a single continuous line.  No dashes anywhere.
+    _W_DIM_MAIN   0.6   dim-line endpoint ticks
+    _W_DIM_STRIPE 0.8   stripe tick stroke
+    _W_LEADER     0.8   leader lines and their arrowhead chevrons
 
 Self-check
 ----------
@@ -97,35 +166,38 @@ failure it prints the line range around the parse error.
 
 import math
 
+from playground_fonts import FONT_FAMILY_SANS, FONT_FACE_CSS
+
 
 PRINT_SCALE = 0.1
 
-# Outer margin around the whole drawing, in printed millimetres.  The
-# final SVG's width and height include 2 × MARGIN_MM — MARGIN_MM of
-# empty border on each edge — and no drawn element is placed closer
-# than MARGIN_MM to any edge.
+# Outer margin around the whole drawing, in printed millimetres.
 MARGIN_MM = 30.0
 
 # Extra safety pad around each label, as a fraction of the label's
-# font size, applied only to the whole-image bbox.  The label.hw and
-# label.hh values are CHAR_ASPECT-based estimates used by the layout;
-# the actual rendered text of a wide display face can extend a few
-# percent wider, and a taller cap height can push the ascender past
-# hh.  This pad makes the bbox cover that, so the outer margin below
-# stays truly empty.
+# font size, applied only to the whole-image bbox.
 LABEL_BBOX_PAD_FRAC = 0.15
 
 # Printed widths, in mm.
-_W_PLAN      = 1.2
-_W_COL       = 1.1
-_W_STEP      = 0.9
-_W_DIM_SMALL = 1.0
-_W_DIM_MAIN  = 0.6
-_W_TEXT      = 0.6
+_W_PLAN       = 1.2
+_W_COL        = 1.1
+_W_STEP       = 0.9
+_W_DIM_MAIN   = 0.6     # dim-line endpoint ticks
+_W_DIM_STRIPE = 0.8     # stripe tick stroke
+_W_LEADER     = 0.8     # leader lines and their arrowhead chevrons
+
+# Stripe parameters for the dimension lines.  See the module docstring.
+_STRIPE_PERIOD_MM = 2.5
+_STRIPE_TICK_MM   = 2.4
+_STRIPE_ANGLE_DEG = 60.0
 
 COLOR_INK   = "#000000"
-COLOR_RED   = "#d91a1a"
-FONT_FAMILY = "sans-serif"
+COLOR_PAPER = "#ffffff"     # only used by the inverted pass
+
+# The typeface comes from playground_fonts.py — the same single
+# source of truth the cable and boxes playgrounds use.  Edit
+# playground_fonts.py to change it; nothing here needs to change.
+FONT_FAMILY = FONT_FAMILY_SANS
 
 # Dot radius, as a fraction of arrow_size.
 _DOT_RADIUS_FACTOR = 0.35
@@ -139,18 +211,7 @@ def _esc(s):
 
 
 def _bbox_of(geom, layout):
-    """Compute the drawing's bounding box in source units.
-
-    Covers every element the renderer emits — plan faces, step edges
-    (solid and dashed), column outlines, all four dimension-line
-    arrays and the tick array, every label, and every leader segment
-    including its target anchor — so the outer margin applied by
-    render() ends up as a uniform empty border around the whole
-    drawing.
-
-    Labels are padded by LABEL_BBOX_PAD_FRAC × font size on every
-    side, because label.hw / label.hh are CHAR_ASPECT-based estimates
-    and a wide display face can render wider than that."""
+    """Compute the drawing's bounding box in source units."""
     xs, ys = [], []
 
     def add_pt(p):
@@ -160,7 +221,6 @@ def _bbox_of(geom, layout):
         for a, b in segs:
             add_pt(a); add_pt(b)
 
-    # Plan outlines (walls, including their hole rings).
     for face in geom["planFaces"]:
         for p in face["outer"]:
             add_pt(p)
@@ -168,7 +228,6 @@ def _bbox_of(geom, layout):
             for p in h:
                 add_pt(p)
 
-    # Steps, columns, dimension lines, ticks.
     add_segs(layout.get("step_lines_solid",  []))
     add_segs(layout.get("step_lines_dashed", []))
     add_segs(layout.get("col_outline_lines", []))
@@ -177,16 +236,11 @@ def _bbox_of(geom, layout):
     add_segs(layout.get("col_dim_lines",     []))
     add_segs(layout.get("dim_ticks",         []))
 
-    # Labels and notes: collision box, padded to cover font wobble.
     for lb in layout["labels"] + layout["notes_labels"]:
         pad = lb.size * LABEL_BBOX_PAD_FRAC
         xs.append(lb.pos[0] - lb.hw - pad); xs.append(lb.pos[0] + lb.hw + pad)
         ys.append(lb.pos[1] - lb.hh - pad); ys.append(lb.pos[1] + lb.hh + pad)
 
-    # Leaders, including their target anchors.  The tail sits on the
-    # label box edge (covered above) and the tip is the anchor; the
-    # arrowhead wings are between them, so the two endpoints bound the
-    # whole segment.
     for anchor, seg in (layout.get("leaders") or {}).values():
         if anchor is not None:
             add_pt(anchor)
@@ -242,6 +296,54 @@ def _arrowhead_segments(tip, tail, size):
     return [(w1, (wx, wy)), (w2, (wx, wy))]
 
 
+def _striped_segment_svg(x1, y1, x2, y2, color):
+    """Emit a line from (x1, y1) to (x2, y2) as a series of short
+    ticks rotated away from the line's own direction.
+
+    Screen coordinates in, list of SVG <line> element strings out.
+    The ticks are laid out every _STRIPE_PERIOD_MM along the line,
+    each _STRIPE_TICK_MM long, at _STRIPE_ANGLE_DEG from the line's
+    own direction, stroked at _W_DIM_STRIPE millimetres."""
+    dx = x2 - x1
+    dy = y2 - y1
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return []
+    ux = dx / L
+    uy = dy / L
+
+    # Tick direction: rotate the line's unit vector by the stripe
+    # angle.  At 60° from the line's own direction, the ticks lean
+    # sharply across the line and read as "striped", not "dashed".
+    a = math.radians(_STRIPE_ANGLE_DEG)
+    ca, sa = math.cos(a), math.sin(a)
+    tx = ux * ca - uy * sa
+    ty = ux * sa + uy * ca
+
+    half = _STRIPE_TICK_MM / 2.0
+    period = _STRIPE_PERIOD_MM
+    n = int(L / period) + 2
+
+    els = []
+    for k in range(n):
+        u = k * period
+        if u > L + 1e-6:
+            break
+        cx = x1 + ux * u
+        cy = y1 + uy * u
+        ex1 = cx - tx * half
+        ey1 = cy - ty * half
+        ex2 = cx + tx * half
+        ey2 = cy + ty * half
+        els.append(
+            f'<line x1="{ex1:.3f}" y1="{ey1:.3f}" '
+            f'x2="{ex2:.3f}" y2="{ey2:.3f}" '
+            f'stroke="{color}" stroke-width="{_W_DIM_STRIPE:.3f}" '
+            f'stroke-linecap="butt"/>'
+        )
+    return els
+
+
 def render(geom, layout):
     minx, miny, maxx, maxy = _bbox_of(geom, layout)
 
@@ -252,11 +354,12 @@ def render(geom, layout):
         return ((x - minx) * PRINT_SCALE + MARGIN_MM,
                 (maxy - y) * PRINT_SCALE + MARGIN_MM)
 
-    def line(p1, p2, stroke_mm):
+    def line(p1, p2, stroke_mm, stroke_color=COLOR_INK):
         x1, y1 = to_screen(p1[0], p1[1])
         x2, y2 = to_screen(p2[0], p2[1])
         return (f'<line x1="{x1:.3f}" y1="{y1:.3f}" '
                 f'x2="{x2:.3f}" y2="{y2:.3f}" '
+                f'stroke="{stroke_color}" '
                 f'stroke-width="{stroke_mm:.3f}"/>')
 
     def circle(center_src, radius_src, fill):
@@ -271,8 +374,8 @@ def render(geom, layout):
         parts = []
         x, y = to_screen(poly[0][0], poly[0][1])
         parts.append(f"M {x:.3f} {y:.3f}")
-        for p in poly[1:]:
-            x, y = to_screen(p[0], p[1])
+        for pt in poly[1:]:
+            x, y = to_screen(pt[0], pt[1])
             parts.append(f"L {x:.3f} {y:.3f}")
         parts.append("Z")
         return " ".join(parts)
@@ -283,6 +386,18 @@ def render(geom, layout):
             if h:
                 d += " " + poly_path(h)
         return d
+
+    def box_path(x0, y0, x1, y1):
+        sx0, sy0 = to_screen(x0, y0)
+        sx1, sy1 = to_screen(x1, y1)
+        rx = min(sx0, sx1)
+        ry = min(sy0, sy1)
+        rw = abs(sx1 - sx0)
+        rh = abs(sy1 - sy0)
+        return (f"M {rx:.3f} {ry:.3f} "
+                f"L {rx + rw:.3f} {ry:.3f} "
+                f"L {rx + rw:.3f} {ry + rh:.3f} "
+                f"L {rx:.3f} {ry + rh:.3f} Z")
 
     def text(p_src, s, size_src):
         x, y = to_screen(p_src[0], p_src[1])
@@ -299,6 +414,45 @@ def render(geom, layout):
     leaders      = layout.get("leaders", {})
     arrow_size   = layout["arrow_size"]
 
+    # Precompute the SVG path strings for every black-filled region.
+    wall_ds = []
+    for face in geom["planFaces"]:
+        d = face_path(face)
+        if d:
+            wall_ds.append(d)
+    col_ds = []
+    for col in geom["columns"]:
+        x0, y0, x1, y1 = col["box"]
+        col_ds.append(box_path(x0, y0, x1, y1))
+
+    # Collect the inverting line geometry once — both passes use it.
+    #
+    #   striped_segs  the dim-line geometry, drawn as stripes
+    #   solid_segs    the endpoint ticks, drawn as short solid strokes
+    #   leader_lines  leader paths and arrowhead chevrons
+    #   leader_dots   polygon-target dots
+    striped_segs = []
+    for group_key in ("dim_lines_main", "dim_lines_small", "col_dim_lines"):
+        for (a, b) in layout.get(group_key, []):
+            striped_segs.append((a, b))
+    solid_segs = list(layout.get("dim_ticks", []))
+
+    leader_lines = []
+    leader_dots  = []
+    for i, lb in enumerate(labels):
+        leader = leaders.get(i)
+        if leader is None:
+            continue
+        anchor_pt, seg = leader
+        if seg is not None:
+            tail, tip = seg[0], seg[1]
+            leader_lines.append((tail, tip))
+            if lb.tip == "arrow":
+                for (a, b) in _arrowhead_segments(tip, tail, arrow_size):
+                    leader_lines.append((a, b))
+        if lb.tip == "dot" and anchor_pt is not None:
+            leader_dots.append(anchor_pt)
+
     p = []
     p.append('<?xml version="1.0" encoding="UTF-8"?>')
     p.append(
@@ -306,23 +460,59 @@ def render(geom, layout):
         f'width="{W:.2f}mm" height="{H:.2f}mm" '
         f'viewBox="0 0 {W:.2f} {H:.2f}">')
 
-    # plan faces — outline only
-    p.append(f'<g fill="none" stroke="{COLOR_INK}" '
+    # ----------------------------------------------------------------
+    # <defs> — fonts, then the mask
+    # ----------------------------------------------------------------
+    p.append('<defs>')
+
+    # The @font-face block, base64-inlined, so the SVG file is fully
+    # self-contained.  The base64 alphabet (A-Za-z0-9+/=) and the
+    # @font-face syntax itself contain no characters that clash with
+    # XML parsing — the CDATA wrapper is belt-and-braces, and also
+    # keeps the browser from misreading any CSS comment-like sequence
+    # in the payload.
+    if FONT_FACE_CSS:
+        p.append('<style type="text/css"><![CDATA[')
+        p.append(FONT_FACE_CSS)
+        p.append(']]></style>')
+
+    # Mask — visible ONLY where a black fill is (walls + columns).
+    MASK_ID = "blackFillMask"
+    p.append(f'<mask id="{MASK_ID}" '
+             f'maskUnits="userSpaceOnUse" '
+             f'maskContentUnits="userSpaceOnUse" '
+             f'x="0" y="0" '
+             f'width="{W:.3f}" height="{H:.3f}">')
+    for d in wall_ds:
+        p.append(f'<path d="{d}" fill="white" fill-rule="evenodd"/>')
+    for d in col_ds:
+        p.append(f'<path d="{d}" fill="white"/>')
+    p.append('</mask>')
+
+    p.append('</defs>')
+
+    # ---- 1. WALL FILLS -------------------------------------------------
+    p.append(f'<g fill="{COLOR_INK}" stroke="{COLOR_INK}" '
+             f'fill-rule="evenodd" '
              f'stroke-width="{_W_PLAN:.3f}">')
-    for face in geom["planFaces"]:
-        d = face_path(face)
-        if d:
-            p.append(f'<path d="{d}"/>')
+    for d in wall_ds:
+        p.append(f'<path d="{d}"/>')
     p.append('</g>')
 
-    # step outlines — SOLID edges first (risers against walls).
+    # ---- 2. COLUMN FILLS -----------------------------------------------
+    p.append(f'<g fill="{COLOR_INK}" stroke="{COLOR_INK}" '
+             f'stroke-width="{_W_COL:.3f}">')
+    for d in col_ds:
+        p.append(f'<path d="{d}"/>')
+    p.append('</g>')
+
+    # ---- 3. STEP OUTLINES ----------------------------------------------
     p.append(f'<g fill="none" stroke="{COLOR_INK}" '
              f'stroke-width="{_W_STEP:.3f}">')
     for (a, b) in layout["step_lines_solid"]:
         p.append(line(a, b, _W_STEP))
     p.append('</g>')
 
-    # step outlines — DASHED edges (free-standing risers).
     p.append(f'<g fill="none" stroke="{COLOR_INK}" '
              f'stroke-width="{_W_STEP:.3f}" '
              f'stroke-dasharray="6 4">')
@@ -330,75 +520,55 @@ def render(geom, layout):
         p.append(line(a, b, _W_STEP))
     p.append('</g>')
 
-    # column outlines
+    # ---- 4. COLUMN LEFTOVER OUTLINES -----------------------------------
     p.append(f'<g fill="none" stroke="{COLOR_INK}" '
              f'stroke-width="{_W_COL:.3f}">')
     for (a, b) in layout["col_outline_lines"]:
         p.append(line(a, b, _W_COL))
     p.append('</g>')
 
-    # main dimension lines
-    p.append(f'<g fill="none" stroke="{COLOR_RED}" '
-             f'stroke-width="{_W_DIM_MAIN:.3f}">')
-    for (a, b) in layout["dim_lines_main"]:
-        p.append(line(a, b, _W_DIM_MAIN))
-    p.append('</g>')
+    # ----------------------------------------------------------------
+    # 5. INVERTING LINE GEOMETRY — collected once, emitted twice
+    # ----------------------------------------------------------------
+    # The striped dimension lines, the dim-line endpoint ticks, the
+    # leaders (with their arrowheads and dots) all read as inverted
+    # wherever they cross a wall or a column fill.  Both passes
+    # share the same geometry; only the colour and the mask differ.
+    def _emit_inverting_pass(color, wrap_mask):
+        if wrap_mask:
+            p.append(f'<g mask="url(#{MASK_ID})">')
 
-    # small-room dimension lines
-    p.append(f'<g fill="none" stroke="{COLOR_RED}" '
-             f'stroke-width="{_W_DIM_SMALL:.3f}">')
-    for (a, b) in layout["dim_lines_small"]:
-        p.append(line(a, b, _W_DIM_SMALL))
-    p.append('</g>')
+        # Striped dimension lines.
+        for (a, b) in striped_segs:
+            sa = to_screen(a[0], a[1])
+            sb = to_screen(b[0], b[1])
+            for el in _striped_segment_svg(sa[0], sa[1], sb[0], sb[1],
+                                           color):
+                p.append(el)
 
-    # column dimension lines
-    p.append(f'<g fill="none" stroke="{COLOR_RED}" '
-             f'stroke-width="{_W_COL:.3f}">')
-    for (a, b) in layout["col_dim_lines"]:
-        p.append(line(a, b, _W_COL))
-    p.append('</g>')
+        # Solid short endpoint ticks.
+        for (a, b) in solid_segs:
+            p.append(line(a, b, _W_DIM_STRIPE, color))
 
-    # dimension-line ticks
-    p.append(f'<g fill="none" stroke="{COLOR_RED}" '
-             f'stroke-width="{_W_DIM_MAIN:.3f}">')
-    for (a, b) in layout["dim_ticks"]:
-        p.append(line(a, b, _W_DIM_MAIN))
-    p.append('</g>')
+        # Leaders — lines, arrowheads, dots.
+        for (a, b) in leader_lines:
+            p.append(line(a, b, _W_LEADER, color))
+        for (cx, cy) in leader_dots:
+            p.append(circle((cx, cy),
+                            arrow_size * _DOT_RADIUS_FACTOR,
+                            color))
 
-    # leaders — solid, continuous, no dashes
-    p.append(f'<g stroke="{COLOR_INK}" stroke-width="{_W_TEXT:.3f}" '
-             f'stroke-linecap="round" fill="none">')
-    for i, lb in enumerate(labels):
-        leader = leaders.get(i)
-        if leader is None:
-            continue
-        _anchor, seg = leader
-        if seg is None:
-            continue
-        tail, tip = seg[0], seg[1]
-        p.append(line(tail, tip, _W_TEXT))
-        if lb.tip == "arrow":
-            for (a, b) in _arrowhead_segments(tip, tail, arrow_size):
-                p.append(line(a, b, _W_TEXT))
-    p.append('</g>')
+        if wrap_mask:
+            p.append('</g>')
 
-    # dots sit on top of the leaders, one per polygon-target label
-    p.append(f'<g stroke="none">')
-    for i, lb in enumerate(labels):
-        if lb.tip != "dot":
-            continue
-        leader = leaders.get(i)
-        if leader is None:
-            continue
-        anchor_pt, seg = leader
-        if seg is None:
-            continue
-        p.append(circle(anchor_pt,
-                        arrow_size * _DOT_RADIUS_FACTOR,
-                        COLOR_INK))
-    p.append('</g>')
+    # Pass 1: black, unmasked — the normal appearance over paper.
+    _emit_inverting_pass(COLOR_INK, wrap_mask=False)
 
-    # text, on top of everything
+    # Pass 2: white, masked to the black fills — visible only over a
+    # wall or a column, drawn on top of pass 1, so it wins there.
+    _emit_inverting_pass(COLOR_PAPER, wrap_mask=True)
+
+    # ---- 6. TEXT -------------------------------------------------------
     p.append(f'<g fill="{COLOR_INK}" stroke="none">')
     for lb in labels + notes_labels:
         p.append(text(lb.pos, lb.text, lb.size))
