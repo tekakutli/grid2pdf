@@ -79,19 +79,32 @@ If the human asks you to extend this router, then:
     3. Preserve this docstring, the TOOLS registry shape, and every
        helper below. Where you change behavior, add a comment explaining
        *why* so the next reader understands.
-    4. PRESERVE, DO NOT PRUNE. Every existing comment, docstring, section
-       header, and prose block is here for a reason — usually because a
-       previous edit was made *because* of a specific failure. Do not
-       delete, merge, shorten, reword, or "clean up" anything you were
-       not explicitly asked to change. If two passages seem redundant,
-       they are almost certainly guarding two different failure modes;
-       leave both. If a section looks stale or unused (for example, the
-       SHELL INTEGRATION block below if the human has since replaced the
-       wrapper), leave it anyway and mention it in your reply — the human
-       decides what is dead, not you. When in doubt, add rather than
-       remove. The docstring is long on purpose: its length IS the
-       documentation, and trimming it destroys information that the next
-       reader — human or AI — will need.
+    4. PRESERVE FUNCTIONAL CONTENT, DO NOT PRUNE IT. Every existing
+       comment, docstring, section header, and prose block that
+       carries functional content — a rule, a rationale, a guard
+       against a known failure — is load-bearing and must be left
+       intact. Do not delete, merge, shorten, reword, or "clean up"
+       any such passage unless you were explicitly asked to change
+       it. If two passages seem redundant, they are almost certainly
+       guarding two different failure modes; leave both. If a section
+       looks stale or unused (for example, the SHELL INTEGRATION
+       block below), leave it anyway and mention it in your reply —
+       the human decides what is dead, not you. When in doubt, add
+       rather than remove. The docstring is long on purpose: its
+       length IS the documentation, and trimming functional content
+       destroys information that the next reader — human or AI —
+       will need. Narration is not functional content; it is governed
+       by rule 5.
+    5. SPEAK IN GENERAL TERMS; DO NOT ADD HISTORICAL NARRATION.
+       Rules, comments, and docstrings in this file must read as
+       though they had always been true. Do not record when an edit
+       happened, what a file or rule used to contain, or how a rule
+       was previously numbered or labelled. A reader arriving cold
+       should not be able to tell from the prose that anything ever
+       changed. This rule governs what *you* add. Existing narration
+       is the human's to remove; leave it in place unless you are
+       already rewriting that passage for another reason, in which
+       case prefer the general phrasing.
 
 STRUCTURAL CHANGES ARE TWO-FILE CHANGES. Adding a tool, adding a param,
 or renaming either, requires editing BOTH this file (to whitelist the
@@ -116,10 +129,11 @@ To add a new tool:
 
 NAMING CONVENTION: a tool's registry key SHOULD match its filename
 without the ".py" extension. `imgs2pdf` points at `imgs2pdf.py`;
-`grid2pdf` points at `grid2pdf.py`. When they diverge, prefer renaming
-the key over renaming the file — the filename is what a human types at
-the shell, the key is what the routing LLM emits, and keeping them
-equal means a human reading the JSON can guess the file, and vice versa.
+`labelsGrid` points at `labelsGrid.py`. When they diverge, prefer
+renaming the key over renaming the file — the filename is what a human
+types at the shell, the key is what the routing LLM emits, and keeping
+them equal means a human reading the JSON can guess the file, and vice
+versa.
 
 --------------------------------------------------------------------------------
 TOLERANCE POLICY
@@ -133,6 +147,11 @@ TOLERANT about presentation. The line between the two is:
         * Leading / trailing whitespace and newlines.
         * Appending ".pdf" to OUTPUT_PDF when the value has no file
           extension. Bounded, single-param, documented here.
+        * Accepting the instruction JSON as a command-line argument
+          (inline form) in addition to a file path or stdin. This is
+          an *input channel*, not a semantic tolerance — the JSON
+          itself is parsed and validated identically regardless of
+          where it came from. See USAGE for detection rules.
         These are unambiguously correct-but-wrapped inputs. Unwrapping
         them loses no information about the routing LLM's intent.
 
@@ -165,84 +184,66 @@ with a one-line rationale.
 --------------------------------------------------------------------------------
 USAGE
 --------------------------------------------------------------------------------
+    python3 mcp.py                # interactive: prompt on /dev/tty and
+                                  # read lines until the input parses as
+                                  # JSON, then dispatch it. This is the
+                                  # no-argument default.
     python3 mcp.py path/to/instruction.json
+                                  # read the instruction from a file
+    python3 mcp.py '{"tool":"...","params":{...}}'
+                                  # inline JSON: the argument itself is
+                                  # the instruction. Detected when the
+                                  # argument, after the same fence-strip
+                                  # tolerance the file path uses, begins
+                                  # with "{". No file or stdin round-
+                                  # trip needed for one-liners. NOTE:
+                                  # use SHELL single quotes around the
+                                  # JSON — double quotes in the shell
+                                  # would terminate at the first inner
+                                  # " and split the JSON across argv.
     python3 mcp.py -              # read instruction JSON from stdin
     python3 mcp.py --self         # print this file (useful when editing)
+    python3 mcp.py --help         # print this file's docstring
 
 --------------------------------------------------------------------------------
 SHELL INTEGRATION
 --------------------------------------------------------------------------------
-The intended human-facing entry point is a bash function `mcp` that
-prompts for the instruction JSON on the terminal, accumulates lines
-until the input parses, and pipes the result to this router via stdin.
+The human-facing entry point is a one-line shell alias that runs this
+script. Interactive behavior — the `json> ` prompt, line accumulation,
+the same fence-strip tolerance as _load_instruction, the blank-line
+escape hatch, the 200-line cap, and the post-parse input drain — is
+implemented in-process by `_interactive_mode` below. The shell side
+therefore has nothing left to do but point at the script:
 
-Drop the following into ~/.bashrc (adjust MCP_PY to match the absolute
-path of this file), then `source ~/.bashrc`:
+    alias mcp='python3 /path/to/mcp.py'
 
-    MCP_PY="$HOME/files/code/grid2pdf/mcp.py"
+Adjust the path to the absolute location of this file, then drop the
+alias into ~/.bashrc and `source ~/.bashrc`. Alternatively, `chmod +x`
+this file and alias its path directly:
 
-    mcp() {
-        if [[ $# -eq 0 ]]; then
-            local json="" line lines=0
-            printf 'json> ' > /dev/tty
-            while IFS= read -r line < /dev/tty; do
-                json+="$line"$'\n'
-                lines=$((lines + 1))
+    alias mcp=/path/to/mcp.py
 
-                # Blank line = "I'm done, parse what I have."
-                [[ -z "$line" && -n "${json//[$'\n']/}" ]] && break
+Behavior notes (enforced inside this file):
 
-                # Same tolerance as mcp.py: strip one wrapping fence, trim.
-                if printf '%s' "$json" | python3 -c '
-    import json, sys, re
-    text = sys.stdin.read()
-    m = re.match(r"^\s*```(?:json|JSON)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL)
-    if m: text = m.group(1)
-    json.loads(text.strip())
-    ' 2>/dev/null; then
-                    break
-                fi
-
-                # Bail after 200 lines — something is very wrong.
-                if (( lines > 200 )); then
-                    printf '\n[aborted: %d lines without parseable JSON]\n' "$lines" > /dev/tty
-                    return 1
-                fi
-            done
-
-            [[ -z "${json//[$'\n']/}" ]] && return 1
-
-            # Drain any pending input (trailing prose after valid JSON).
-            while IFS= read -r -t 0.05 _ < /dev/tty; do :; done
-
-            printf '\n' > /dev/tty
-            printf '%s' "$json" | python3 "$MCP_PY" -
-        else
-            python3 "$MCP_PY" "$@"
-        fi
-    }
-
-Behavior notes for the shell wrapper (keep these in mind if you edit
-either side):
-
-    * With no arguments, `mcp` prompts on /dev/tty and reads lines until
-      the accumulated text parses as JSON. A blank line forces an early
-      parse attempt — useful as an escape hatch if the input is
-      truncated.
-    * It applies the same fence-strip tolerance as _load_instruction in
-      this file, so a fenced paste is accepted at the prompt too.
+    * With no arguments, `mcp` prompts on /dev/tty with `json> ` and
+      reads lines until the accumulated text parses as JSON. A blank
+      line forces an early parse attempt — useful as an escape hatch
+      if the input is truncated.
+    * It applies the same fence-strip tolerance as _load_instruction,
+      so a fenced paste is accepted at the prompt too.
     * The 200-line cap prevents a runaway paste from looping forever.
     * After a successful parse, pending input is drained so trailing
-      prose (should the routing LLM ignore the "no prose" rule) does not
-      leak into the next shell command.
-    * With arguments, `mcp` forwards them verbatim to this file, so
-      `mcp cmd.json`, `mcp -`, `mcp --self`, `mcp --help` all work as
-      documented above.
+      prose (should the routing LLM ignore the "no prose" rule) does
+      not leak into the next shell command.
+    * With arguments, the alias forwards them verbatim, so
+      `mcp cmd.json`, `mcp -`, `mcp --self`, `mcp --help`, and the
+      inline form `mcp '{"tool":...}'` all work as documented above.
+      The alias itself needs no change for the inline form — the JSON
+      is just an argument like any other.
 
-The wrapper is a convenience, not a contract. This file's interface is
-its command-line arguments and stdin; the `mcp` shell function is one
-particular UX over that interface. If you replace the wrapper, nothing
-in this file needs to change.
+The alias is a convenience, not a contract. This file's interface is
+its command-line arguments and stdin; the `mcp` alias is one particular
+UX over that interface.
 
 --------------------------------------------------------------------------------
 """
@@ -250,6 +251,7 @@ in this file needs to change.
 import ast
 import json
 import re
+import select
 import sys
 from pathlib import Path
 
@@ -269,31 +271,29 @@ from pathlib import Path
 # For the human-readable description of each tool and each param, see
 # INSTRUCT.md. That file is the routing manual; this one is the gate.
 #
-# Example instruction for the first tool below (shape only — see
-# INSTRUCT.md for what each param actually means):
+# Example instruction for imgs2pdf (shape only — see INSTRUCT.md for
+# what each param actually means):
 #
 #     {
-#       "tool": "grid2pdf",
+#       "tool": "imgs2pdf",
 #       "params": {
 #         "INPUT_DIR": "/home/me/photos",
 #         "OUTPUT_PDF": "/home/me/album.pdf",
-#         "GRID_COLS": 4,
-#         "GRID_ROWS": 2,
-#         "SHOW_FILENAME": false
+#         "TWO_HORIZONTAL_PER_PAGE": true,
+#         "SHOW_FILENAME_LABEL": false
 #       }
 #     }
 # =============================================================================
 
 TOOLS = {
-    "grid2pdf": {
-        "file": "grid2pdf.py",
+    "captionize": {
+        "file": "captionize.py",
         "entry": "main",
         "params": [
-            "INPUT_DIR",
-            "OUTPUT_PDF",
-            "GRID_COLS",
-            "GRID_ROWS",
-            "SHOW_FILENAME",
+            "INPUT_IMAGE",
+            "TEXT",
+            "SHRINK_RATIO",
+            "ROTATE_BEFORE_PROCESSING",
         ],
     },
     "imgs2pdf": {
@@ -304,6 +304,37 @@ TOOLS = {
             "OUTPUT_PDF",
             "TWO_HORIZONTAL_PER_PAGE",
             "SHOW_FILENAME_LABEL",
+        ],
+    },
+    "labelsGrid": {
+        "file": "labelsGrid.py",
+        "entry": "main",
+        "params": [
+            "LABELS",
+            "SHOW_CELL_BOUNDARIES",
+        ],
+    },
+    "grid2pdf": {
+        "file": "grid2pdf.py",
+        "entry": "main",
+        "params": [
+            "INPUT_IMAGE",
+            "OUTPUT_PDF",
+            "C",
+            "R",
+            "OVERLAP_DELTA",
+        ],
+    },
+    "imgs2grid": {
+        "file": "imgs2grid.py",
+        "entry": "main",
+        "params": [
+            "INPUT_DIR",
+            "OUTPUT_PDF",
+            "SHOW_FILENAME",
+            "NUMBER_IMAGES",
+            "GRID_COLS",
+            "GRID_ROWS",
         ],
     },
     # ── Add more tools here, following the three-key shape above. ──
@@ -463,14 +494,37 @@ def _load_instruction(arg):
     surrounding whitespace are stripped before parsing. Everything else
     is passed through to json.loads unchanged, so malformed input fails
     with a specific message rather than being silently repaired.
+
+    INPUT SOURCES, in detection order:
+        1. The literal "-"  — read the instruction from stdin.
+        2. Inline JSON       — the argument itself is the instruction
+           text. Detected when the argument, after the same fence-strip
+           tolerance used below, begins with "{". This is the
+           `mcp '{"tool":...}'` form: it skips the file / stdin round-
+           trip entirely, which is what makes one-liners convenient.
+           The detection runs BEFORE the Path.is_file() branch, so it
+           is the caller's responsibility to use a shell quoting style
+           that keeps the JSON in a single argv element (single quotes
+           in POSIX shells).
+        3. A filesystem path  — read the instruction from that file.
     """
     if arg == "-":
         raw = sys.stdin.read()
     else:
-        path = Path(arg)
-        if not path.is_file():
-            raise SystemExit(f"Instruction file not found: {path}")
-        raw = path.read_text(encoding="utf-8")
+        # Inline-JSON detection. A JSON object always begins with "{"
+        # once whitespace / fence-strip tolerance has been applied. A
+        # filesystem path beginning with "{" is possible in principle
+        # but vanishingly rare; if it ever occurs, the "-" stdin form
+        # or an explicit re-invocation from a directory where the path
+        # does not start with "{" is the escape hatch. Checking inline
+        # first is what lets the common one-liner form skip the disk.
+        if _strip_fences(arg).strip().startswith("{"):
+            raw = arg
+        else:
+            path = Path(arg)
+            if not path.is_file():
+                raise SystemExit(f"Instruction file not found: {path}")
+            raw = path.read_text(encoding="utf-8")
 
     cleaned = _strip_fences(raw).strip()
 
@@ -483,22 +537,127 @@ def _load_instruction(arg):
         )
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def _try_parse(text):
+    """Best-effort parse check for the interactive prompt.
 
-    arg = sys.argv[1]
+    Returns True if `text` (after fence-strip tolerance) is a complete,
+    valid JSON value. Never raises — this is a *liveness* signal for the
+    interactive read loop, not a validator; the authoritative parse
+    happens once the user has finished typing, and errors are reported
+    there with the same diagnostics as _load_instruction.
+    """
+    try:
+        json.loads(_strip_fences(text).strip())
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return True
 
-    if arg in ("-h", "--help"):
-        print(__doc__)
-        return
 
-    if arg == "--self":
-        print(Path(__file__).read_text(encoding="utf-8"))
-        return
+def _interactive_mode():
+    """Prompt on /dev/tty and read lines until the accumulated text
+    parses as instruction JSON, then dispatch it.
 
-    instruction = _load_instruction(arg)
+    Implements the `json> ` prompt, the blank-line escape hatch, the
+    same fence-strip tolerance as _load_instruction, the 200-line cap,
+    and the post-parse input drain in-process, so the human needs only
+    a one-line shell alias. See the SHELL INTEGRATION section of the
+    module docstring for the alias.
+
+    Returns an exit status (0 on success, 1 on user-side abort). If the
+    instruction itself is well-formed but names an unknown tool or
+    unknown param, the usual SystemExit from run_tool propagates.
+    """
+    # Prefer /dev/tty: the prompt must appear on the terminal even when
+    # stdin/stdout are being redirected (e.g. when `mcp` is used mid-
+    # pipeline). Fall back to the standard streams if /dev/tty is
+    # unavailable for any reason.
+    try:
+        tty_in = open("/dev/tty", "r")
+    except OSError:
+        tty_in = sys.stdin
+    try:
+        tty_out = open("/dev/tty", "w")
+    except OSError:
+        tty_out = sys.stdout
+
+    try:
+        lines = []
+        tty_out.write("json> ")
+        tty_out.flush()
+
+        while True:
+            line = tty_in.readline()
+            if line == "":
+                # EOF on the tty. Take whatever we have as final.
+                break
+            line = line.rstrip("\n")
+            lines.append(line)
+            accumulated = "\n".join(lines)
+
+            # Blank line = "I'm done, parse what I have."
+            if line == "" and accumulated.strip():
+                break
+
+            # Same tolerance as _load_instruction: strip one wrapping
+            # fence, then ask whether the remainder is valid JSON.
+            if _try_parse(accumulated):
+                break
+
+            # Bail after 200 lines — something is very wrong.
+            if len(lines) > 200:
+                tty_out.write(
+                    f"\n[aborted: {len(lines)} lines without parseable JSON]\n"
+                )
+                tty_out.flush()
+                return 1
+
+        accumulated = "\n".join(lines)
+        if not accumulated.strip():
+            # Nothing typed, or only whitespace. Silent abort.
+            return 1
+
+        # Drain any pending input (trailing prose after valid JSON) so
+        # it does not leak into the next shell command, using select
+        # for the timeout.
+        try:
+            while select.select([tty_in], [], [], 0.05)[0]:
+                if not tty_in.readline():
+                    break
+        except (OSError, ValueError):
+            # select() can raise on non-selectable streams (e.g. the
+            # stdin fallback on some platforms). The drain is a nicety,
+            # not a correctness requirement — skip it quietly.
+            pass
+
+        tty_out.write("\n")
+        tty_out.flush()
+
+        cleaned = _strip_fences(accumulated).strip()
+        try:
+            instruction = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            sys.stderr.write(
+                f"Instruction is not valid JSON: {e}\n"
+                f"--- received ---\n{cleaned}\n--- end ---\n"
+            )
+            return 1
+
+        _dispatch(instruction)
+        return 0
+    finally:
+        if tty_in is not sys.stdin:
+            tty_in.close()
+        if tty_out is not sys.stdout:
+            tty_out.close()
+
+
+def _dispatch(instruction):
+    """Validate a parsed instruction object and run the named tool.
+
+    Exists so both the file/stdin path and the interactive prompt path
+    share a single implementation of the checks, the trace line, and
+    the success message.
+    """
     if not isinstance(instruction, dict):
         raise SystemExit("Instruction JSON must be an object.")
 
@@ -516,6 +675,27 @@ def main():
     print(f"[mcp] tool={tool!r} params={params!r}", file=sys.stderr)
     run_tool(tool, params)
     print("[mcp] done.", file=sys.stderr)
+
+
+def main():
+    if len(sys.argv) < 2:
+        # No arguments -> interactive prompt. The loop lives in-process.
+        # See the SHELL INTEGRATION section of the module docstring for
+        # the one-line alias.
+        sys.exit(_interactive_mode())
+
+    arg = sys.argv[1]
+
+    if arg in ("-h", "--help"):
+        print(__doc__)
+        return
+
+    if arg == "--self":
+        print(Path(__file__).read_text(encoding="utf-8"))
+        return
+
+    instruction = _load_instruction(arg)
+    _dispatch(instruction)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 # ========== CONFIGURATION - EDIT THESE VALUES ==========
+# Router-patchable inputs. mcp.py rewrites these top-level assignments
+# before exec'ing this module (see the AST patcher in mcp.py); when the
+# script is run directly from the shell, the CLI arguments take
+# precedence over them. Both are plain top-level `NAME = value` lines
+# so the patcher can find and replace them.
+INPUT_IMAGE = None
+TEXT = None
+
 # Suffix inserted between the input stem and extension
 # (e.g. "photo.jpg" -> "photo_labeled.jpg").
 OUTPUT_SUFFIX = "_labeled"
@@ -85,6 +93,13 @@ LABEL_PADDING_X = 20
 #   MAXIMIZE_PAGE_USAGE = True,  AVOID_CROP = True               -> "maximize, no crop"
 MAXIMIZE_PAGE_USAGE = True
 AVOID_CROP = True
+
+# Strip mode only. After the image is scaled into the area below the
+# strip, shrink the canvas width down to the scaled image's width so the
+# leftover side margins disappear. Set False to keep the old behavior
+# (canvas keeps the input's full width, and the scaled image is centered
+# in it, leaving background bands on either side).
+TRIM_SIDE_MARGINS = True
 # =======================================================
 
 
@@ -300,13 +315,27 @@ def captionize(in_path, out_path, text):
 
     else:
         # "strip" mode.
-        canvas = Image.new(out_mode, (W, canvas_h), LABEL_BACKGROUND)
-        _draw_label(canvas, text, 0, 0, W, strip_h, LABEL_COLOR)
+        src = img if img.mode == out_mode else img.convert(out_mode)
 
+        # Scale first so we know the actual content width.
+        scaled = None
         if image_area_h > 0:
-            src = img if img.mode == out_mode else img.convert(out_mode)
             scaled = _scale(src, W, image_area_h)
-            x = (W - scaled.width) // 2
+
+        # Trim the canvas width to the scaled image's width. When the
+        # image is height-limited by the area below the strip (the usual
+        # case whenever SHRINK_RATIO > 0), scaled.width < W and the extra
+        # width is pure background; dropping it removes the side bands.
+        if TRIM_SIDE_MARGINS and scaled is not None and 0 < scaled.width < W:
+            eff_W = scaled.width
+        else:
+            eff_W = W
+
+        canvas = Image.new(out_mode, (eff_W, canvas_h), LABEL_BACKGROUND)
+        _draw_label(canvas, text, 0, 0, eff_W, strip_h, LABEL_COLOR)
+
+        if scaled is not None:
+            x = (eff_W - scaled.width) // 2
             y = strip_h + (image_area_h - scaled.height) // 2
             if scaled.mode == 'RGBA' and canvas.mode == 'RGBA':
                 canvas.paste(scaled, (x, y), scaled)
@@ -345,7 +374,20 @@ def parse_args():
             "  python3 captionize.py photo.jpg --text \"Figure 3\"\n"
         ),
     )
-    parser.add_argument("input", help="Input image path")
+    # nargs="?" so argparse does not hard-exit when the router in mcp.py
+    # invokes this script with an empty sys.argv (sys.argv = [script]).
+    # In that case args.input is None and main() falls back to the
+    # top-level INPUT_IMAGE variable, which the router has patched.
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help=(
+            "Input image path. Optional so the tool can run under the "
+            "router in mcp.py, which supplies the path via the top-level "
+            "INPUT_IMAGE variable instead of a CLI positional."
+        ),
+    )
     parser.add_argument(
         "--text",
         default=None,
@@ -361,7 +403,14 @@ def parse_args():
 def main():
     args = parse_args()
 
-    in_path = os.path.expanduser(args.input)
+    # Input path resolution order: CLI positional, then the
+    # router-patched top-level INPUT_IMAGE.
+    in_path = args.input if args.input is not None else INPUT_IMAGE
+    if in_path is None:
+        print("Error: no input image given (pass a path on the command "
+              "line or set INPUT_IMAGE).")
+        sys.exit(1)
+    in_path = os.path.expanduser(in_path)
     if not os.path.isfile(in_path):
         print(f"Error: Input image '{in_path}' does not exist.")
         sys.exit(1)
@@ -374,10 +423,17 @@ def main():
               "(check OUTPUT_SUFFIX).")
         sys.exit(1)
 
-    caption_text = (
-        args.text if args.text is not None
-        else os.path.splitext(os.path.basename(in_path))[0]
-    )
+    # Caption resolution order: --text on the CLI wins, then the
+    # router-patched top-level TEXT, then the input's filename stem.
+    if args.text is not None:
+        caption_text = args.text
+        caption_source = "custom --text"
+    elif TEXT is not None:
+        caption_text = TEXT
+        caption_source = "custom TEXT"
+    else:
+        caption_text = os.path.splitext(os.path.basename(in_path))[0]
+        caption_source = "filename"
     if not SHOW_LABEL:
         caption_text = ""
 
@@ -406,8 +462,7 @@ def main():
         print(f"  Rotated: 90 deg CW before, 90 deg CCW after "
               f"(label strip lands on the LEFT edge)")
     if SHOW_LABEL:
-        source = "custom --text" if args.text is not None else "filename"
-        print(f"  Caption: {caption_text!r}  ({source})")
+        print(f"  Caption: {caption_text!r}  ({caption_source})")
         print(f"  Mode:    {LABEL_MODE}")
         if LABEL_MODE == "strip":
             print(f"  Strip:   {strip_h} px "
@@ -418,6 +473,8 @@ def main():
                   f"{image_area_h}, "
                   f"canvas growth: +{canvas_h - work_h} px")
             print(f"  Scaling: {scaling}")
+            if TRIM_SIDE_MARGINS:
+                print("  Trim:    side margins trimmed to scaled image width")
     else:
         print("  Caption: off (image copied unchanged)")
     print("=" * 60)

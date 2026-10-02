@@ -90,16 +90,33 @@ an angle.  On a horizontal dimension line the marks read as a row
 of diagonal ticks; on a vertical one, as a column of them.  It is
 unmistakably not a leader and unmistakably not a wall outline.
 
+A ruler has three striped strokes: the main dim line (the one with
+the endpoint ticks) and two extension lines that run from the wall
+to the dim line.  The main dim line uses _STRIPE_TICK_MM; the
+extension lines use the shorter _STRIPE_EXT_TICK_MM so the ruler's
+side lines read as thinner than its spine, while keeping the same
+tick stroke weight — the stripes are the same texture, they just
+form a narrower band.
+
 Tuning:
-    _STRIPE_PERIOD_MM   spacing between tick centres, along the line
-    _STRIPE_TICK_MM     length of each individual tick
-    _STRIPE_ANGLE_DEG   angle between the tick and the line's own
-                        direction; 90° would make them perpendicular,
-                        0° would make them parallel (a normal dashed
-                        line), 60° gives the striped look.
-    _W_DIM_STRIPE       the stripe tick stroke width — heavier than
-                        the leader stroke, so the ticks read as a
-                        texture rather than as hairlines.
+    _STRIPE_PERIOD_MM     spacing between tick centres, along the line
+    _STRIPE_TICK_MM       length of each individual tick — the main
+                          dim line and the endpoint ticks
+    _STRIPE_EXT_TICK_MM   tick length for the ruler's extension
+                          (side) lines only — shorter than
+                          _STRIPE_TICK_MM, so the side lines read as
+                          a thinner line than the ruler's spine
+                          while keeping the same stroke weight (the
+                          same texture, narrower band)
+    _STRIPE_ANGLE_DEG     angle between the tick and the line's own
+                          direction; 90° would make them perpendicular,
+                          0° would make them parallel (a normal dashed
+                          line), 60° gives the striped look.
+    _W_DIM_STRIPE         the stripe tick stroke — heavier than the
+                          leader stroke, so the ticks read as a
+                          texture rather than as hairlines.  Shared
+                          by the main dim line and the extension
+                          lines; only the tick LENGTH differs.
 
 Walls and columns — solid black fills
 -------------------------------------
@@ -155,7 +172,8 @@ The six _W_* constants are the printed widths, in millimetres.
     _W_COL        1.1   column footprint outline
     _W_STEP       0.9   step riser outline
     _W_DIM_MAIN   0.6   dim-line endpoint ticks
-    _W_DIM_STRIPE 0.8   stripe tick stroke
+    _W_DIM_STRIPE 0.8   stripe tick stroke (shared by the dim line
+                        and by the ruler's extension lines)
     _W_LEADER     0.8   leader lines and their arrowhead chevrons
 
 Self-check
@@ -183,13 +201,21 @@ _W_PLAN       = 1.2
 _W_COL        = 1.1
 _W_STEP       = 0.9
 _W_DIM_MAIN   = 0.6     # dim-line endpoint ticks
-_W_DIM_STRIPE = 0.8     # stripe tick stroke
+_W_DIM_STRIPE = 0.8     # stripe tick stroke — shared by the dim line
+                        # and by the ruler's extension (side) lines
 _W_LEADER     = 0.8     # leader lines and their arrowhead chevrons
 
 # Stripe parameters for the dimension lines.  See the module docstring.
-_STRIPE_PERIOD_MM = 2.5
-_STRIPE_TICK_MM   = 2.4
-_STRIPE_ANGLE_DEG = 60.0
+#
+# The main dim line and the two extension lines share the same period,
+# tick stroke, and angle, so they read as one family of strokes.  Only
+# the tick LENGTH differs: the extension lines get the shorter
+# _STRIPE_EXT_TICK_MM, which narrows the band they form and makes the
+# side of the ruler read as a thinner line than the ruler's spine.
+_STRIPE_PERIOD_MM   = 2.5
+_STRIPE_TICK_MM     = 2.4
+_STRIPE_EXT_TICK_MM = 1.6
+_STRIPE_ANGLE_DEG   = 60.0
 
 COLOR_INK   = "#000000"
 COLOR_PAPER = "#ffffff"     # only used by the inverted pass
@@ -228,13 +254,16 @@ def _bbox_of(geom, layout):
             for p in h:
                 add_pt(p)
 
-    add_segs(layout.get("step_lines_solid",  []))
-    add_segs(layout.get("step_lines_dashed", []))
-    add_segs(layout.get("col_outline_lines", []))
-    add_segs(layout.get("dim_lines_main",    []))
-    add_segs(layout.get("dim_lines_small",   []))
-    add_segs(layout.get("col_dim_lines",     []))
-    add_segs(layout.get("dim_ticks",         []))
+    add_segs(layout.get("step_lines_solid",    []))
+    add_segs(layout.get("step_lines_dashed",   []))
+    add_segs(layout.get("col_outline_lines",   []))
+    add_segs(layout.get("dim_lines_main",      []))
+    add_segs(layout.get("dim_lines_small",     []))
+    add_segs(layout.get("dim_ext_lines_main",  []))
+    add_segs(layout.get("dim_ext_lines_small", []))
+    add_segs(layout.get("col_dim_lines",       []))
+    add_segs(layout.get("col_dim_ext_lines",   []))
+    add_segs(layout.get("dim_ticks",           []))
 
     for lb in layout["labels"] + layout["notes_labels"]:
         pad = lb.size * LABEL_BBOX_PAD_FRAC
@@ -296,14 +325,21 @@ def _arrowhead_segments(tip, tail, size):
     return [(w1, (wx, wy)), (w2, (wx, wy))]
 
 
-def _striped_segment_svg(x1, y1, x2, y2, color):
+def _striped_segment_svg(x1, y1, x2, y2, color,
+                         stroke_width=_W_DIM_STRIPE,
+                         tick_length=_STRIPE_TICK_MM):
     """Emit a line from (x1, y1) to (x2, y2) as a series of short
     ticks rotated away from the line's own direction.
 
     Screen coordinates in, list of SVG <line> element strings out.
     The ticks are laid out every _STRIPE_PERIOD_MM along the line,
-    each _STRIPE_TICK_MM long, at _STRIPE_ANGLE_DEG from the line's
-    own direction, stroked at _W_DIM_STRIPE millimetres."""
+    each `tick_length` long, at _STRIPE_ANGLE_DEG from the line's
+    own direction, stroked at `stroke_width` millimetres.
+
+    The defaults draw the ruler's spine.  The ruler's extension
+    lines call this with the shorter `tick_length=_STRIPE_EXT_TICK_MM`
+    so the band they form is narrower — a thinner line — while
+    keeping the same tick stroke weight, i.e. the same texture."""
     dx = x2 - x1
     dy = y2 - y1
     L = math.hypot(dx, dy)
@@ -320,7 +356,7 @@ def _striped_segment_svg(x1, y1, x2, y2, color):
     tx = ux * ca - uy * sa
     ty = ux * sa + uy * ca
 
-    half = _STRIPE_TICK_MM / 2.0
+    half = tick_length / 2.0
     period = _STRIPE_PERIOD_MM
     n = int(L / period) + 2
 
@@ -338,7 +374,7 @@ def _striped_segment_svg(x1, y1, x2, y2, color):
         els.append(
             f'<line x1="{ex1:.3f}" y1="{ey1:.3f}" '
             f'x2="{ex2:.3f}" y2="{ey2:.3f}" '
-            f'stroke="{color}" stroke-width="{_W_DIM_STRIPE:.3f}" '
+            f'stroke="{color}" stroke-width="{stroke_width:.3f}" '
             f'stroke-linecap="butt"/>'
         )
     return els
@@ -427,14 +463,25 @@ def render(geom, layout):
 
     # Collect the inverting line geometry once — both passes use it.
     #
-    #   striped_segs  the dim-line geometry, drawn as stripes
-    #   solid_segs    the endpoint ticks, drawn as short solid strokes
-    #   leader_lines  leader paths and arrowhead chevrons
-    #   leader_dots   polygon-target dots
+    #   striped_segs      the ruler's dim-line geometry — the spine,
+    #                     drawn at _STRIPE_TICK_MM / _W_DIM_STRIPE
+    #   striped_ext_segs  the ruler's extension-line geometry — the
+    #                     side lines, drawn at _STRIPE_EXT_TICK_MM /
+    #                     _W_DIM_STRIPE (same texture, thinner band)
+    #   solid_segs        the endpoint ticks, drawn as short solid strokes
+    #   leader_lines      leader paths and arrowhead chevrons
+    #   leader_dots       polygon-target dots
     striped_segs = []
     for group_key in ("dim_lines_main", "dim_lines_small", "col_dim_lines"):
         for (a, b) in layout.get(group_key, []):
             striped_segs.append((a, b))
+
+    striped_ext_segs = []
+    for group_key in ("dim_ext_lines_main", "dim_ext_lines_small",
+                      "col_dim_ext_lines"):
+        for (a, b) in layout.get(group_key, []):
+            striped_ext_segs.append((a, b))
+
     solid_segs = list(layout.get("dim_ticks", []))
 
     leader_lines = []
@@ -538,12 +585,26 @@ def render(geom, layout):
         if wrap_mask:
             p.append(f'<g mask="url(#{MASK_ID})">')
 
-        # Striped dimension lines.
+        # The ruler's spine — the main dim line.  Full tick length.
         for (a, b) in striped_segs:
             sa = to_screen(a[0], a[1])
             sb = to_screen(b[0], b[1])
             for el in _striped_segment_svg(sa[0], sa[1], sb[0], sb[1],
-                                           color):
+                                           color,
+                                           tick_length=_STRIPE_TICK_MM):
+                p.append(el)
+
+        # The ruler's side lines — the extension lines.  Same tick
+        # stroke, same period, same angle: the stripes are the same
+        # texture.  Only the tick LENGTH differs, so the band they
+        # form is narrower and the side lines read as a thinner line
+        # than the spine.
+        for (a, b) in striped_ext_segs:
+            sa = to_screen(a[0], a[1])
+            sb = to_screen(b[0], b[1])
+            for el in _striped_segment_svg(sa[0], sa[1], sb[0], sb[1],
+                                           color,
+                                           tick_length=_STRIPE_EXT_TICK_MM):
                 p.append(el)
 
         # Solid short endpoint ticks.
@@ -577,5 +638,5 @@ def render(geom, layout):
     p.append('</svg>')
 
     svg = "\n".join(p) + "\n"
-    _self_check(svg)
+    _self_check(shot(svg)) if False else _self_check(svg)
     return svg

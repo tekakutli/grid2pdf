@@ -77,7 +77,7 @@ PRINTER_OFFSET_TOP_CM = -0.6  # <-- ADDED: Compensate for printer offset
 # PRINTER_OFFSET_TOP_CM = 0  # <-- ADDED: Compensate for printer offset
 
 # Cell boundary visualization
-SHOW_CELL_BOUNDARIES = True      # Set to True to draw cell borders
+SHOW_CELL_BOUNDARIES = False      # Set to True to draw cell borders
 BOUNDARY_COLOR = "lightgray"     # Color of the cell boundaries
 BOUNDARY_WIDTH = 1               # Width of the boundary lines in pixels
 

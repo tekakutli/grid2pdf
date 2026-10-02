@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-# DeepSeek chat reference: https://chat.deepseek.com/a/chat/s/23776899-ace3-4ba9-a8a2-a9d2d83bb21e
 """
-Grid Images to PDF Converter with optional filename labels
------------------------------------------------------------
+imgs2grid.py Grid Images to PDF Converter with optional filename/number labels
+-----------------------------------------------------------------
 Takes all images in a directory, groups them into bunches of 9 (3x3 grid),
 and places each bunch on a single US Letter page (300 DPI).
 Each image is scaled to fit its cell while preserving aspect ratio.
-Optionally, the filename (without extension) is printed below each image.
+Optionally, the filename (without extension) or a sequential number is
+printed below each image.
 Supports per-edge margins, cell spacing, and optional forced rotation.
 Only processes images in the top-level directory (no subdirectories).
 
 Usage:
-    python3 script.py [directory_path]
+    python3 script.py [directory_path] [-n|--numbers]
+
+Options:
+    -n, --numbers   Print a sequential number below each image instead
+                    of the filename.
+    -h, --help      Show this help message.
 
 If no directory is given, the INPUT_DIR variable in the script is used.
 """
@@ -39,15 +44,17 @@ CELL_GAP = 20
 # set to False to leave all images in their original orientation.
 ROTATE_TO_VERTICAL = True
 
-# ------------- FILENAME LABEL OPTIONS -------------
-SHOW_FILENAME = True           # Set to True to print filename below each image
+# ------------- LABEL OPTIONS -------------
+SHOW_FILENAME = True           # Print filename below each image
+NUMBER_IMAGES = False          # Print a sequential number below each image
+                               # (takes precedence over SHOW_FILENAME)
 FONT_SIZE = 30                 # Font size in pixels (at 300 DPI)
 FONT_COLOR = "black"           # Any valid PIL color (e.g., "black", "#333333")
-FONT_PATH = "/usr/share/fonts/noto/NotoSans-Regular.ttf"               # Path to a .ttf/.otf file, or None for default PIL font
+FONT_PATH = "/usr/share/fonts/noto/NotoSans-Regular.ttf"  # .ttf/.otf path, or None
 TEXT_MARGIN_BOTTOM = 10        # Extra space below the text (within the cell)
 GAP_BETWEEN_IMAGE_AND_TEXT = 5  # Gap between the image and the text (pixels)
-EXTRA_GAP_BELOW_TEXT = 10       # Additional gap below the text (increases space to next row)
-# ---------------------------------------------------
+EXTRA_GAP_BELOW_TEXT = 10       # Additional gap below the text
+# -----------------------------------------
 
 # Set to True for RAW mode (exact pixels, no final scaling),
 # False for normal mode (pages are already at US Letter size)
@@ -70,74 +77,71 @@ def get_images(directory):
     """Return sorted list of image paths in the top-level directory."""
     images = []
     for ext in IMAGE_EXTS:
-        # Use glob with case-insensitive matching
         pattern = f"*{ext}"
         for path in Path(directory).glob(pattern):
             if path.is_file():
                 images.append(str(path))
-        # also check uppercase extensions
         for path in Path(directory).glob(f"*{ext.upper()}"):
             if path.is_file() and str(path) not in images:
                 images.append(str(path))
     return sorted(images)
 
 
-def create_grid_page(images_chunk, page_num, total_pages):
+def create_grid_page(images_chunk, page_num, total_pages, start_index=0):
     """
     Create a single page (PIL Image) with up to 9 images arranged in a 3x3 grid.
-    If SHOW_FILENAME is True, each image will have its base name (without extension)
-    printed below it, with a configurable gap between the image and the text,
-    and an extra configurable gap below the text to increase row separation.
+
+    Labels (if enabled):
+      - NUMBER_IMAGES=True  -> print a sequential number (1-based, global)
+      - else SHOW_FILENAME  -> print the filename base (no extension)
+
+    `start_index` is the global index of the first image in `images_chunk`
+    (used so the numbering continues across pages).
     """
-    # Create white canvas
     page = Image.new('RGB', (PAGE_WIDTH, PAGE_HEIGHT), 'white')
 
-    # Calculate live area and cell dimensions
     live_width = PAGE_WIDTH - MARGIN_LEFT - MARGIN_RIGHT
     live_height = PAGE_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
     cell_width = (live_width - (GRID_COLS - 1) * CELL_GAP) // GRID_COLS
     cell_height = (live_height - (GRID_ROWS - 1) * CELL_GAP) // GRID_ROWS
 
-    # Prepare font if labels are enabled
+    labels_enabled = SHOW_FILENAME or NUMBER_IMAGES
+
     font = None
-    if SHOW_FILENAME:
+    if labels_enabled:
         try:
             if FONT_PATH and os.path.isfile(FONT_PATH):
                 font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
             else:
-                # Use default PIL font (bitmap, may be small)
                 font = ImageFont.load_default()
-                print(f"  Warning: Using default PIL font; FONT_PATH not set or invalid.")
+                print("  Warning: Using default PIL font; FONT_PATH not set or invalid.")
         except Exception as e:
             print(f"  Warning: Could not load font: {e}. Using default.")
             font = ImageFont.load_default()
 
-    # Process up to 9 images
     for idx, img_path in enumerate(images_chunk):
         row = idx // GRID_COLS
         col = idx % GRID_COLS
 
-        # Compute top-left corner of the cell (including margins and gaps)
         cell_x = MARGIN_LEFT + col * (cell_width + CELL_GAP)
         cell_y = MARGIN_TOP + row * (cell_height + CELL_GAP)
 
-        # Open image and possibly rotate to vertical
         with Image.open(img_path) as img:
-            # Convert to RGB if necessary (e.g., PNG with alpha)
             if img.mode in ('RGBA', 'LA', 'P'):
                 img = img.convert('RGB')
 
-            # Rotate if requested and image is landscape
             if ROTATE_TO_VERTICAL and img.width > img.height:
                 img = img.rotate(90, expand=True)
 
-            # Determine space needed for text (if labels are enabled)
             text_height = 0
             text_width = 0
             label = ""
-            if SHOW_FILENAME:
-                label = os.path.splitext(os.path.basename(img_path))[0]
-                # Get text dimensions using the font
+            if labels_enabled:
+                if NUMBER_IMAGES:
+                    label = str(start_index + idx + 1)
+                else:
+                    label = os.path.splitext(os.path.basename(img_path))[0]
+
                 draw = ImageDraw.Draw(page)
                 try:
                     bbox = draw.textbbox((0, 0), label, font=font)
@@ -150,32 +154,22 @@ def create_grid_page(images_chunk, page_num, total_pages):
                         text_width = len(label) * FONT_SIZE // 2
                         text_height = FONT_SIZE
 
-            # Calculate available height for the image
-            if SHOW_FILENAME:
-                # Place text at the bottom of the cell, with margins and extra gap below
+            if labels_enabled:
                 text_y = cell_y + cell_height - text_height - TEXT_MARGIN_BOTTOM - EXTRA_GAP_BELOW_TEXT
-                # The image must end above the text, leaving GAP_BETWEEN_IMAGE_AND_TEXT
                 max_img_height = text_y - GAP_BETWEEN_IMAGE_AND_TEXT - cell_y
-                # Ensure we don't get negative
                 if max_img_height < 0:
                     max_img_height = 0
             else:
                 max_img_height = cell_height
 
-            # Resize image to fit within (cell_width, max_img_height)
             img.thumbnail((cell_width, max_img_height), Image.Resampling.LANCZOS)
 
-            # Center the image horizontally and vertically in the image zone
             x_offset = cell_x + (cell_width - img.width) // 2
-            # The image zone is from cell_y to cell_y + max_img_height
             y_offset = cell_y + (max_img_height - img.height) // 2
 
-            # Paste onto page
             page.paste(img, (x_offset, y_offset))
 
-            # If labels are enabled, draw the filename below the image
-            if SHOW_FILENAME:
-                # The text_y is already computed; we just need to center horizontally
+            if labels_enabled:
                 text_x = cell_x + (cell_width - text_width) // 2
                 draw.text((text_x, text_y), label, fill=FONT_COLOR, font=font)
 
@@ -183,30 +177,33 @@ def create_grid_page(images_chunk, page_num, total_pages):
 
 
 def print_usage():
-    print("Usage: python3 script.py [directory_path]")
+    print("Usage: python3 script.py [directory_path] [-n|--numbers]")
     print("If no directory is given, the INPUT_DIR variable in the script is used.")
     print("Options:")
-    print("  -h, --help    Show this help message")
+    print("  -n, --numbers   Number each image sequentially instead of showing filenames")
+    print("  -h, --help      Show this help message")
 
 
 def main():
-    # Parse command line arguments
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
+    global NUMBER_IMAGES, SHOW_FILENAME
+
+    input_dir = None
+    for arg in sys.argv[1:]:
         if arg in ('-h', '--help'):
             print_usage()
             sys.exit(0)
+        elif arg in ('-n', '--numbers'):
+            NUMBER_IMAGES = True
         else:
             input_dir = arg
-    else:
+
+    if input_dir is None:
         input_dir = INPUT_DIR
 
-    # Check if directory exists
     if not os.path.isdir(input_dir):
         print(f"Error: Directory '{input_dir}' does not exist.")
         sys.exit(1)
 
-    # Get all images
     images = get_images(input_dir)
     total_images = len(images)
     if total_images == 0:
@@ -214,20 +211,28 @@ def main():
         print(f"Supported formats: {', '.join(IMAGE_EXTS)}")
         sys.exit(1)
 
-    # Calculate number of pages
     images_per_page = GRID_COLS * GRID_ROWS
     total_pages = ceil(total_images / images_per_page)
 
+    labels_enabled = SHOW_FILENAME or NUMBER_IMAGES
+
     print("==============================================")
-    print("Grid Images to PDF Converter (3×3 per page)")
+    print("Grid Images to PDF Converter (3x3 per page)")
     print("==============================================")
     print(f"Found {total_images} image(s) in: {input_dir}")
     print(f"Will generate {total_pages} page(s) (9 images per page)")
     print(f"Margins - Top:{MARGIN_TOP} Bottom:{MARGIN_BOTTOM} Left:{MARGIN_LEFT} Right:{MARGIN_RIGHT}")
     print(f"Cell gap: {CELL_GAP} px")
     print(f"Rotate to vertical: {'YES' if ROTATE_TO_VERTICAL else 'NO'}")
-    print(f"Show filenames: {'YES' if SHOW_FILENAME else 'NO'}")
-    if SHOW_FILENAME:
+
+    if NUMBER_IMAGES:
+        print("Label mode: NUMBERS (sequential, across pages)")
+    elif SHOW_FILENAME:
+        print("Label mode: FILENAMES")
+    else:
+        print("Label mode: NONE")
+
+    if labels_enabled:
         print(f"  Font size: {FONT_SIZE} px, Color: {FONT_COLOR}")
         print(f"  Font path: {FONT_PATH if FONT_PATH else 'default'}")
         print(f"  Gap between image and text: {GAP_BETWEEN_IMAGE_AND_TEXT} px")
@@ -236,7 +241,6 @@ def main():
     print("==============================================")
     print()
 
-    # Process each page
     pages = []
     for page_num in range(total_pages):
         start = page_num * images_per_page
@@ -245,13 +249,12 @@ def main():
         print(f"--- Page {page_num+1}/{total_pages} ---")
         for img_path in chunk:
             print(f"  Processing: {os.path.basename(img_path)}")
-        page_img = create_grid_page(chunk, page_num+1, total_pages)
+        page_img = create_grid_page(chunk, page_num + 1, total_pages, start_index=start)
         pages.append(page_img)
-        print(f"  ✓ Page {page_num+1} ready")
+        print(f"  Page {page_num+1} ready")
 
     print()
     print("Saving PDF...")
-    # Save all pages as a single PDF
     pages[0].save(
         OUTPUT_PDF,
         save_all=True,
@@ -259,7 +262,7 @@ def main():
         resolution=300.0,
         title="Grid Images PDF"
     )
-    print(f"✓ PDF created: {OUTPUT_PDF}")
+    print(f"PDF created: {OUTPUT_PDF}")
     print(f"  Total pages: {total_pages}")
     print("==============================================")
 

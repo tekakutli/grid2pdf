@@ -1970,9 +1970,10 @@ def build_layout(geom):
             fixed_obstacles.append((p1, p2))
 
     # ---- 3. column dims and column outlines ------------------------
-    col_dim_lines  = []
-    col_dim_labels = []
-    col_dim_ticks  = []
+    col_dim_lines      = []
+    col_dim_ext_lines  = []
+    col_dim_labels     = []
+    col_dim_ticks      = []
     crowding_threshold = COL_DIM_CROWDING_UNITS * MM
 
     for col in geom["columns"]:
@@ -2055,7 +2056,9 @@ def build_layout(geom):
             return best
 
         w_segs, w_ticks, w_mid, w_dir = _pick(w_candidates, w_hw, w_hh)
-        col_dim_lines += w_segs
+        col_dim_lines.append(w_segs[2])
+        col_dim_ext_lines.append(w_segs[0])
+        col_dim_ext_lines.append(w_segs[1])
         col_dim_ticks += w_ticks
         for s in w_segs + w_ticks:
             fixed_obstacles.append(s)
@@ -2065,7 +2068,9 @@ def build_layout(geom):
         col_dim_labels.append(w_label)
 
         h_segs, h_ticks, h_mid, h_dir = _pick(h_candidates, h_hw, h_hh)
-        col_dim_lines += h_segs
+        col_dim_lines.append(h_segs[2])
+        col_dim_ext_lines.append(h_segs[0])
+        col_dim_ext_lines.append(h_segs[1])
         col_dim_ticks += h_ticks
         for s in h_segs + h_ticks:
             fixed_obstacles.append(s)
@@ -2094,18 +2099,24 @@ def build_layout(geom):
                                  EXT_GAP, EXT_OVER, TICK_HALF,
                                  ext_gap_shared, MM)
 
-    dim_lines_main  = []
-    dim_lines_small = []
-    dim_ticks       = list(col_dim_ticks)
-    obstacles       = list(fixed_obstacles)
+    dim_lines_main      = []
+    dim_lines_small     = []
+    dim_ext_lines_main  = []
+    dim_ext_lines_small = []
+    dim_ticks           = list(col_dim_ticks)
+    obstacles           = list(fixed_obstacles)
 
     wall_label_positions = {}
     ruler_meta = []
     for ruler, segs, ticks in placed:
         if ruler.kind == "main":
-            dim_lines_main += segs
+            dim_lines_main.append(segs[2])
+            dim_ext_lines_main.append(segs[0])
+            dim_ext_lines_main.append(segs[1])
         else:
-            dim_lines_small += segs
+            dim_lines_small.append(segs[2])
+            dim_ext_lines_small.append(segs[0])
+            dim_ext_lines_small.append(segs[1])
         dim_ticks += ticks
         for s in segs:
             obstacles.append(s)
@@ -2202,17 +2213,20 @@ def build_layout(geom):
     meta["rulers"] = ruler_meta
 
     return {
-        "dim_lines_main":     dim_lines_main,
-        "dim_lines_small":    dim_lines_small,
-        "col_dim_lines":      col_dim_lines,
-        "dim_ticks":          dim_ticks,
-        "col_outline_lines":  col_outline_lines,
-        "step_lines_solid":   step_lines_solid,
-        "step_lines_dashed":  step_lines_dashed,
-        "labels":             labels,
-        "notes_labels":       notes_labels,
-        "notes_placement":    notes_placement,
-        "leaders":            leaders,
-        "arrow_size":         ARROW_SIZE,
-        "meta":               meta,
+        "dim_lines_main":      dim_lines_main,
+        "dim_lines_small":     dim_lines_small,
+        "dim_ext_lines_main":  dim_ext_lines_main,
+        "dim_ext_lines_small": dim_ext_lines_small,
+        "col_dim_lines":       col_dim_lines,
+        "col_dim_ext_lines":   col_dim_ext_lines,
+        "dim_ticks":           dim_ticks,
+        "col_outline_lines":   col_outline_lines,
+        "step_lines_solid":    step_lines_solid,
+        "step_lines_dashed":   step_lines_dashed,
+        "labels":              labels,
+        "notes_labels":        notes_labels,
+        "notes_placement":     notes_placement,
+        "leaders":             leaders,
+        "arrow_size":          ARROW_SIZE,
+        "meta":                meta,
     }

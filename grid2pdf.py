@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
+# grid2pdf.py
 # DYNAMIC GRID TO PDF CONVERTER (PER-EDGE MARGINS)
 # ============================================
 # A script that scales and splits an image into parts for printing.
@@ -7,8 +8,8 @@
 # specified in centimetres (converted to pixels automatically).
 #
 # USAGE:
-#   python script.py [image_path]    # optional: override INPUT_IMAGE
-#   python script.py --dimensions    # print final image dimensions and exit
+#   python grid2pdf.py [image_path]    # optional: override INPUT_IMAGE
+#   python grid2pdf.py --dimensions    # print final image dimensions and exit
 #
 #   If no image is given, the INPUT_IMAGE variable below is used.
 # ============================================
@@ -17,6 +18,9 @@ import os
 import sys
 import argparse
 from PIL import Image
+
+# Explicit script name
+SCRIPT_NAME = "grid2pdf.py"
 
 # ========== EDIT THESE VALUES (defaults) ==========
 INPUT_IMAGE = "image.jpg"      # Path to your image (can be overridden via CLI)
@@ -103,14 +107,22 @@ def get_image_path(args):
         return args.input_image
     if INPUT_IMAGE:
         return INPUT_IMAGE
-    print("Error: No input image specified. Set INPUT_IMAGE in the script or provide it as an argument.", file=sys.stderr)
+    print(
+        f"Error: No input image specified. Set INPUT_IMAGE in {SCRIPT_NAME} "
+        "or provide it as an argument.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
 def main():
     parser = argparse.ArgumentParser(
+        prog=SCRIPT_NAME,
         description="Convert an image to a grid PDF with per‑edge margins (specified in cm).",
-        epilog="All other settings (grid, margins, raw mode) are configured at the top of the script."
+        epilog=(
+            "All other settings (grid, margins, raw mode) are configured at the top "
+            f"of {SCRIPT_NAME}."
+        ),
     )
     parser.add_argument(
         "input_image",
@@ -178,14 +190,23 @@ def main():
         w_cm_max = assembled_w / DPI * 2.54
         h_cm_max = assembled_h / DPI * 2.54
 
-        print(f"Final printed image dimensions (content only, fit preserving aspect): {w_cm_fit:.2f} cm × {h_cm_fit:.2f} cm (at {int(DPI)} DPI)")
+        print(
+            f"Final printed image dimensions (content only, fit preserving aspect): "
+            f"{w_cm_fit:.2f} cm × {h_cm_fit:.2f} cm (at {int(DPI)} DPI)"
+        )
         print(f"Maximum if image fills entire grid (cover): {w_cm_max:.2f} cm × {h_cm_max:.2f} cm")
-        print(f"Based on grid: {C}×{R}, margins (cm) T:{MARGIN_TOP_CM:.2f} B:{MARGIN_BOTTOM_CM:.2f} L:{MARGIN_LEFT_CM:.2f} R:{MARGIN_RIGHT_CM:.2f}  (→ {MARGIN_TOP},{MARGIN_BOTTOM},{MARGIN_LEFT},{MARGIN_RIGHT} px), overlap: {OVERLAP_DELTA} px")
+        print(
+            f"Based on grid: {C}×{R}, margins (cm) "
+            f"T:{MARGIN_TOP_CM:.2f} B:{MARGIN_BOTTOM_CM:.2f} "
+            f"L:{MARGIN_LEFT_CM:.2f} R:{MARGIN_RIGHT_CM:.2f}  "
+            f"(→ {MARGIN_TOP},{MARGIN_BOTTOM},{MARGIN_LEFT},{MARGIN_RIGHT} px), "
+            f"overlap: {OVERLAP_DELTA} px"
+        )
         return
 
     # ---- Normal PDF generation ----
     print("==============================================")
-    print("Dynamic Grid to PDF Converter (Per-Edge Margins)")
+    print(f"{SCRIPT_NAME} - Dynamic Grid to PDF Converter (Per-Edge Margins)")
     print("==============================================")
     print(f"Original dimensions: {orig_w}×{orig_h}")
     if orig_w > orig_h:
@@ -196,7 +217,10 @@ def main():
 
     print(f"Mode: {'RAW (exact pixels)' if RAW_MODE else 'NORMAL (scaled to fit US Letter)'} (DPI={int(DPI)})")
     print(f"Grid: {C}×{R} ({TOTAL_PAGES} pages)")
-    print(f"Margins (cm) - Top:{MARGIN_TOP_CM:.2f} Bottom:{MARGIN_BOTTOM_CM:.2f} Left:{MARGIN_LEFT_CM:.2f} Right:{MARGIN_RIGHT_CM:.2f}")
+    print(
+        f"Margins (cm) - Top:{MARGIN_TOP_CM:.2f} Bottom:{MARGIN_BOTTOM_CM:.2f} "
+        f"Left:{MARGIN_LEFT_CM:.2f} Right:{MARGIN_RIGHT_CM:.2f}"
+    )
     print(f"Margins (px) - Top:{MARGIN_TOP} Bottom:{MARGIN_BOTTOM} Left:{MARGIN_LEFT} Right:{MARGIN_RIGHT}")
     print(f"Live area: {LIVE_WIDTH}×{LIVE_HEIGHT} px")
     print(f"Total grid: {TOTAL_GRID_WIDTH}×{TOTAL_GRID_HEIGHT} px")
@@ -260,7 +284,10 @@ def main():
         print("This PDF uses EXACT pixel dimensions (no scaling).")
     else:
         print("This PDF is scaled to US Letter paper (8.5×11 inches).")
-    print(f"Margins (cm) - Top:{MARGIN_TOP_CM:.2f} Bottom:{MARGIN_BOTTOM_CM:.2f} Left:{MARGIN_LEFT_CM:.2f} Right:{MARGIN_RIGHT_CM:.2f}")
+    print(
+        f"Margins (cm) - Top:{MARGIN_TOP_CM:.2f} Bottom:{MARGIN_BOTTOM_CM:.2f} "
+        f"Left:{MARGIN_LEFT_CM:.2f} Right:{MARGIN_RIGHT_CM:.2f}"
+    )
     print(f"Margins (px) - Top:{MARGIN_TOP} Bottom:{MARGIN_BOTTOM} Left:{MARGIN_LEFT} Right:{MARGIN_RIGHT}")
     if OVERLAP_DELTA > 0:
         print(f"Overlap delta: {OVERLAP_DELTA} px (tiles show extra content; overlap when assembling and trim excess)")
