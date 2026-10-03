@@ -9,3 +9,19 @@ room/leader_optimizer/target/
 # Other
 room/cable_playground.html
 room/boxes_playground.html
+
+*.pdf
+*.svg
+*.png
+
+*.stl
+*.step
+
+*project_dump*
+
+#Specific
+room/room_boxes.json
+room/room_dimensions.json
+room/room_layout.json
+room/room_walls.json
+room/floor_plan_layout.json

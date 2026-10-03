@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-labelsGrid.py
+labels2grid.py
 ------------
 Takes a list of text strings, arranges them in a grid of user-defined rows and columns,
 and places each grid on a US Letter page (300 DPI). The grid occupies a user-defined
@@ -10,7 +10,7 @@ Supports multi-line labels using \n. If there are more labels than cells, multip
 are generated.
 
 Usage:
-    python3 labelsGrid.py
+    python3 labels2grid.py
 """
 
 import os
@@ -82,7 +82,7 @@ BOUNDARY_COLOR = "lightgray"     # Color of the cell boundaries
 BOUNDARY_WIDTH = 1               # Width of the boundary lines in pixels
 
 # Output PDF filename
-OUTPUT_PDF = "labels_grid.pdf"
+OUTPUT_PDF = "labels2grid.pdf"
 
 # Font settings
 FONT_PATH = "/usr/share/fonts/noto/NotoSans-Regular.ttf"   # Path to a .ttf/.otf file, or None for default PIL font

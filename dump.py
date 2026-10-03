@@ -6,10 +6,10 @@ Usage:
     dump.py [-a AFFIX] [-r] [-t]
 
 All configuration (directory, output path, extensions, default affix,
-default recursion, tree-only) is done via the variables at the top of
-this file. The only CLI flags are -a/--affix, -r/--recursive and
--t/--tree-only, which override their DEFAULT_* counterparts when
-provided.
+default recursion, tree-only, excluded directories, included/excluded
+filename substrings) is done via the variables at the top of this file.
+The only CLI flags are -a/--affix, -r/--recursive and -t/--tree-only,
+which override their DEFAULT_* counterparts when provided.
 
 The scanned directory is always recorded at the top of the output, and
 its basename is appended to the output filename (e.g. project_dump.md
@@ -39,13 +39,27 @@ DEFAULT_OUT        = "project_dump.md" # output markdown file
 #   .service  systemd unit files
 #   .md       Markdown
 #   .toml     TOML
-DEFAULT_EXTENSIONS = [".py", ".sh", "yaml"]          # e.g. [".py", ".pyi", ".pyx"]
+DEFAULT_EXTENSIONS = [".py", ".sh", "yaml", ".md", ".conf"]
 DEFAULT_AFFIX      = None             # e.g. "_test" (substring matched in filename)
 DEFAULT_RECURSIVE  = False            # descend into subdirectories
 DEFAULT_TREE_ONLY  = False            # only emit the directory tree, no file contents
+# Directory names to skip entirely (exact match on the directory basename,
+# at any depth). Add your own as needed.
+# DEFAULT_EXCLUDE_DIRS = [".git", "__pycache__", ".venv", "venv", "node_modules"]
+DEFAULT_EXCLUDE_DIRS = [".git", "__pycache__", ".venv", "venv", "node_modules", "kritomatic_xremap"]
+
+# Filename substrings whitelist: if NON-EMPTY, a file is only kept when its
+# filename contains AT LEAST ONE of these substrings (partial match,
+# case-sensitive). Leave empty ([]) to disable this filter entirely.
+# e.g. ["_config", "settings"] to only dump config-like files.
+DEFAULT_INCLUDE_FILE_SUBSTRINGS = ["floor_plan"]
+
+# Filename substrings blacklist: if a filename contains ANY of these
+# (partial match, case-sensitive), the file is skipped.
+# e.g. [".min.", "_test", ".bak"]
+DEFAULT_EXCLUDE_FILE_SUBSTRINGS = ["project_dump"]
 # ---------------------------------------------------------------------------
 
-EXCLUDE_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 HEADER = "=" * 70
 
 # Sentinel key used inside the tree dict to hold the files of a directory.
@@ -65,12 +79,15 @@ def find_files(
     root: Path,
     extensions: list[str],
     affix: str | None,
+    exclude_dirs: set[str],
+    include_file_substrings: list[str],
+    exclude_file_substrings: list[str],
     recursive: bool = True,
 ) -> list[Path]:
     results: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         # prune excluded directories in-place so os.walk skips them
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
 
         # if not recursing, prevent os.walk from descending any further
         if not recursive:
@@ -80,6 +97,15 @@ def find_files(
             if extensions and not any(name.endswith(e) for e in extensions):
                 continue
             if affix and affix not in name:
+                continue
+            # whitelist: if set, filename must contain at least one of these
+            if include_file_substrings and not any(
+                s in name for s in include_file_substrings
+            ):
+                continue
+            if exclude_file_substrings and any(
+                s in name for s in exclude_file_substrings
+            ):
                 continue
             results.append(Path(dirpath) / name)
 
@@ -181,6 +207,9 @@ def main() -> int:
     out = Path(DEFAULT_OUT)
 
     extensions = [e for e in (normalize_ext(x) for x in DEFAULT_EXTENSIONS) if e]
+    exclude_dirs = {d for d in DEFAULT_EXCLUDE_DIRS if d}
+    include_file_substrings = [s for s in DEFAULT_INCLUDE_FILE_SUBSTRINGS if s]
+    exclude_file_substrings = [s for s in DEFAULT_EXCLUDE_FILE_SUBSTRINGS if s]
 
     # Affix: CLI overrides hardcoded default; "" means "no affix"
     affix = args.affix if args.affix is not None else DEFAULT_AFFIX
@@ -193,13 +222,23 @@ def main() -> int:
     # Recursive: -r forces True, -t also forces True; otherwise the default
     recursive = True if (args.recursive or tree_only) else DEFAULT_RECURSIVE
 
-    files = find_files(root, extensions, affix, recursive)
+    files = find_files(
+        root,
+        extensions,
+        affix,
+        exclude_dirs,
+        include_file_substrings,
+        exclude_file_substrings,
+        recursive,
+    )
     if not files:
         msg = f"No files found in '{root}'"
         if extensions:
             msg += f" with extensions {extensions}"
         if affix:
             msg += f" matching affix '{affix}'"
+        if include_file_substrings:
+            msg += f" matching any of {include_file_substrings}"
         if not recursive:
             msg += " (non-recursive)"
         print(msg, file=sys.stderr)
